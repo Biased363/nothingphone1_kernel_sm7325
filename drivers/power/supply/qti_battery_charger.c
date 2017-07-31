@@ -25,6 +25,10 @@
 #include <drm/drm_panel.h>
 #endif
 #include "qti_typec_class.h"
+#ifdef CONFIG_FORCE_FAST_CHARGE
+#include <linux/fastchg.h>
+#define USB_FAST_CHARGE_UA	900000
+#endif
 
 #define MSG_OWNER_BC			32778
 #define MSG_TYPE_REQ_RESP		1
@@ -1055,6 +1059,15 @@ static int usb_psy_set_icl(struct battery_chg_dev *bcdev, u32 prop_id, int val)
 	temp = val;
 	if (val < 0)
 		temp = UINT_MAX;
+
+#ifdef CONFIG_FORCE_FAST_CHARGE
+        if (force_fast_charge > 0 &&
+            (pst->prop[USB_ADAP_TYPE] == POWER_SUPPLY_USB_TYPE_SDP ||
+             pst->prop[USB_ADAP_TYPE] == POWER_SUPPLY_USB_TYPE_CDP)) {
+                temp = USB_FAST_CHARGE_UA;
+                pr_debug("FastCharge: overriding ICL to %u uA\n", temp);
+        }
+#endif
 
 	rc = write_property_id(bcdev, pst, prop_id, temp);
 	if (rc < 0) {
