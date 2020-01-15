@@ -59,11 +59,10 @@ else
 KBUILD_CFLAGS	+= -mgeneral-regs-only
 endif
 
-KBUILD_CFLAGS	+= $(brokengasinst)	\
-		   $(compat_vdso) $(cc_has_k_constraint)
+KBUILD_CFLAGS	+= $(compat_vdso) $(cc_has_k_constraint)
 KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
 KBUILD_CFLAGS	+= $(call cc-disable-warning, psabi)
-KBUILD_AFLAGS	+= $(brokengasinst) $(compat_vdso)
+KBUILD_AFLAGS	+= $(compat_vdso)
 
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
