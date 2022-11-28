@@ -68,7 +68,6 @@
 #define GESTURE_V                               0x54
 #define GESTURE_Z                               0x41
 #define GESTURE_C                               0x34
-#define GESTURE_CLICK                           0x25
 #define GESTURE_FINGER                          0x26
 
 /*****************************************************************************
@@ -365,9 +364,6 @@ static void fts_gesture_report(struct fts_ts_data *ts_data,struct input_dev *inp
     case  GESTURE_C:
         gesture = KEY_GESTURE_C;
         break;
-    case  GESTURE_CLICK:
-        gesture = KEY_GESTURE_CLICK;
-        break;
     case  GESTURE_FINGER:
         gesture = KEY_GESTURE_FINGER;
         break;
@@ -563,7 +559,6 @@ int fts_gesture_init(struct fts_ts_data *ts_data)
     input_set_capability(input_dev, EV_KEY, KEY_GESTURE_V);
     input_set_capability(input_dev, EV_KEY, KEY_GESTURE_Z);
     input_set_capability(input_dev, EV_KEY, KEY_GESTURE_C);
-    input_set_capability(input_dev, EV_KEY, KEY_GESTURE_CLICK);
     input_set_capability(input_dev, EV_KEY, KEY_GESTURE_FINGER);
 
     __set_bit(KEY_GESTURE_RIGHT, input_dev->keybit);
@@ -580,7 +575,6 @@ int fts_gesture_init(struct fts_ts_data *ts_data)
     __set_bit(KEY_GESTURE_V, input_dev->keybit);
     __set_bit(KEY_GESTURE_C, input_dev->keybit);
     __set_bit(KEY_GESTURE_Z, input_dev->keybit);
-    __set_bit(KEY_GESTURE_CLICK, input_dev->keybit);
     __set_bit(KEY_GESTURE_FINGER, input_dev->keybit);
 
     fts_create_gesture_sysfs(ts_data->dev);
