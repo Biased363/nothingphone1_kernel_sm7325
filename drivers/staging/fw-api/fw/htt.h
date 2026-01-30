@@ -24057,4 +24057,59 @@ PREPACK struct htt_t2h_global_peer_id_unmap_t {
     } while (0)
 
 
+/* MSG_TYPE => HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP
+ *
+ * The following diagram shows the format of the global peer unmap message sent
+ * from the target to the host. This message is used to send unmap event to host
+ * after tid and msduq/mpduq cleanup in FW, host cleans up msduq/mpduq based on
+ * message.
+ *
+ * |31             24|23             20|19              8|7               0|
+ * |-----------------------------------------------------------------------|
+ * |   reserved      |   hw_link_id    | global_peer_id  |     msg type    |
+ * |-----------------------------------------------------------------------|
+ * @details
+ * struct htt_t2h_global_peer_id_unmap_t:
+ *
+ * The message is interpreted as follows:
+ * dword0 - b'7:0   - msg_type: Identifies a request for MLO latency stats
+ *                    This will be set to 0x3e
+ *                    (HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP)
+ *          b'19:8  - global_peer_id : global peer id assigned by host
+ *          b'23:20 - hw_link_id : hw link id for which unmap is being sent
+ *
+ */
+
+
+/* HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP */
+PREPACK struct htt_t2h_global_peer_id_unmap_t {
+    A_UINT32 msg_type:               8,  /* bits  7:0  */
+             global_peer_id:         12, /* bits 19:8  */
+             hw_link_id:             4,  /* bits 23:20 */
+             reserved:               8;  /* bits 31:16 */
+} POSTPACK;
+
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID_M  0x000FFF00
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID_S           8
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID_GET(_var) \
+        (((_var) & HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID_M) >> \
+                HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID_S)
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID_SET(_var, _val) \
+    do { \
+        HTT_CHECK_SET_VAL(HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID, _val); \
+        ((_var) |= ((_val) << HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_GLOBAL_PEER_ID_S)); \
+    } while (0)
+
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID_M      0x00F00000
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID_S              20
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID_GET(_var) \
+        (((_var) & HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID_M) >> \
+                HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID_S)
+#define HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID_SET(_var, _val) \
+    do { \
+        HTT_CHECK_SET_VAL(HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID, _val); \
+        ((_var) |= ((_val) << HTT_T2H_MSG_TYPE_GLOBAL_PEER_ID_UNMAP_HW_LINK_ID_S)); \
+    } while (0)
+
+
 #endif

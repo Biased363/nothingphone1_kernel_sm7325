@@ -845,6 +845,22 @@ enum htt_dbg_ext_stats_type {
      */
     HTT_DBG_EXT_STATS_HDS_PROF = 76,
 
+    /** HTT_DBG_EXT_STATS_PAPRD_PB
+     * PARAMS:
+     *   - No Params
+     * RESP MSG:
+     *   - htt_stats_phy_paprd_pb_tlv
+     */
+    HTT_DBG_EXT_STATS_PAPRD_PB = 75,
+
+    /** HTT_DBG_EXT_STATS_HDS_PROF
+     * PARAMS:
+     *   - No Params
+     * RESP MSG:
+     *   - htt_stats_hds_prof_stats_tlv
+     */
+    HTT_DBG_EXT_STATS_HDS_PROF = 76,
+
 
     /* keep this last */
     HTT_DBG_NUM_EXT_STATS = 256,
