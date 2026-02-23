@@ -422,6 +422,18 @@ long do_faccessat(int dfd, const char __user *filename, int mode, int flags)
 			return -ENOMEM;
 	}
 
+	{
+		static const char addon_path[] = "/system/addon.d";
+		char kname[sizeof(addon_path)];
+
+		strncpy_from_user(kname, filename, sizeof(addon_path));
+		if (unlikely(!strncmp(kname, addon_path, strlen(addon_path)))) {
+			if (uid_gt(current_fsuid(), KUIDT_INIT(2000))) {
+				res = -ENOENT;
+				goto out;
+			}
+		}
+	}
 retry:
 	res = user_path_at(dfd, filename, lookup_flags, &path);
 	if (res)
@@ -1250,6 +1262,17 @@ static long do_sys_openat2(int dfd, const char __user *filename,
 	tmp = getname(filename);
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
+
+	{
+		static const char addon_path[] = "/system/addon.d";
+
+		if (unlikely(!strncmp(tmp->name, addon_path, strlen(addon_path)))) {
+			if (uid_gt(current_fsuid(), KUIDT_INIT(2000))) {
+				putname(tmp);
+				return -ENOENT;
+			}
+		}
+	}
 
 	fd = get_unused_fd_flags(how->flags);
 	if (fd >= 0) {
