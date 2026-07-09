@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #ifndef __KGSL_PWRCTRL_H
 #define __KGSL_PWRCTRL_H
@@ -101,7 +102,6 @@ struct kgsl_pwrlevel {
  * @interval_timeout - timeout to be idle before a power event
  * @clock_times - Each GPU frequency's accumulated active time in us
  * @clk_stats - structure of clock statistics
- * @input_disable - To disable GPU wakeup on touch input event
  * @bus_control - true if the bus calculation is independent
  * @bus_mod - modifier from the current power level for the bus vote
  * @bus_percent_ab - current percent of total possible bus usage
@@ -147,7 +147,6 @@ struct kgsl_pwrctrl {
 	unsigned long interval_timeout;
 	u64 clock_times[KGSL_MAX_PWRLEVELS];
 	struct kgsl_clk_stats clk_stats;
-	bool input_disable;
 	bool bus_control;
 	int bus_mod;
 	unsigned int bus_percent_ab;
@@ -231,6 +230,13 @@ int kgsl_pwrctrl_set_default_gpu_pwrlevel(struct kgsl_device *device);
  * @state: Power state requested
  */
 void kgsl_pwrctrl_request_state(struct kgsl_device *device, u32 state);
+
+/**
+ * kgsl_pwrctrl_set_state - Set a specific power state
+ * @device: Pointer to the kgsl device
+ * @state: Power state requested
+ */
+void kgsl_pwrctrl_set_state(struct kgsl_device *device, u32 state);
 
 /**
  * kgsl_pwrctrl_axi - Propagate bus votes during slumber entry and exit

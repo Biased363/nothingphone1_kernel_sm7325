@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2010-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -15,6 +16,9 @@
 #include <linux/mm.h>
 #include <linux/qcom_scm.h>
 #include <asm/cacheflush.h>
+#ifdef CONFIG_QGKI
+#include <drm/drm_refresh_rate.h>
+#endif
 #include <linux/qtee_shmbridge.h>
 
 #include "../../devfreq/governor.h"
@@ -386,11 +390,12 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 	 * Do not waste CPU cycles running this algorithm if
 	 * the GPU just started, or if less than FLOOR time
 	 * has passed since the last run or the gpu hasn't been
-	 * busier than MIN_BUSY.
+	 * busier than MIN_BUSY or there is only 1 power level
 	 */
 	if ((stats->total_time == 0) ||
 		(priv->bin.total_time < FLOOR) ||
-		(unsigned int) priv->bin.busy_time < MIN_BUSY) {
+		(unsigned int) priv->bin.busy_time < MIN_BUSY ||
+		devfreq->profile->max_state == 1) {
 		return 0;
 	}
 
@@ -408,6 +413,13 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 			priv->bin.busy_time > CEILING) {
 		val = -1 * level;
 	} else {
+#ifdef CONFIG_QGKI
+		unsigned int refresh_rate = dsi_panel_get_refresh_rate();
+
+		if (refresh_rate > 60)
+			priv->bin.busy_time = priv->bin.busy_time * refresh_rate / 60;
+#endif
+
 		val = __secure_tz_update_entry3(level, priv->bin.total_time,
 			priv->bin.busy_time, context_count, priv);
 	}

@@ -463,6 +463,7 @@ struct sde_crtc_state {
 	struct sde_hw_scaler3_lut_cfg scl3_lut_cfg;
 
 	struct sde_core_perf_params new_perf;
+	u8 fod_dim_alpha;
 };
 
 enum sde_crtc_irq_state {
@@ -519,7 +520,8 @@ static inline int sde_crtc_get_mixer_width(struct sde_crtc *sde_crtc,
 	if (cstate->num_ds_enabled)
 		mixer_width = cstate->ds_cfg[0].lm_width;
 	else
-		mixer_width = mode->hdisplay / sde_crtc->num_mixers;
+		mixer_width = sde_crtc->num_mixers ?
+			mode->hdisplay / sde_crtc->num_mixers : mode->hdisplay;
 
 	return mixer_width;
 }
@@ -971,5 +973,7 @@ void _sde_crtc_clear_dim_layers_v1(struct drm_crtc_state *state);
  * @crtc: Pointer to DRM crtc object
  */
 void sde_crtc_cancel_delayed_work(struct drm_crtc *crtc);
+
+bool sde_crtc_is_fod_enabled(struct drm_crtc_state *state);
 
 #endif /* _SDE_CRTC_H_ */

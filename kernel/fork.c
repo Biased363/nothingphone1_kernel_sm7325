@@ -435,7 +435,7 @@ static int memcg_charge_kernel_stack(struct task_struct *tsk)
 
 static void release_task_stack(struct task_struct *tsk)
 {
-	if (WARN_ON(tsk->state != TASK_DEAD))
+	if (WARN_ON(READ_ONCE(tsk->__state) != TASK_DEAD))
 		return;  /* Better to leak the stack than to free prematurely */
 
 	account_kernel_stack(tsk, -1);
@@ -474,7 +474,6 @@ void free_task(struct task_struct *tsk)
 #endif
 	rt_mutex_debug_task_free(tsk);
 	ftrace_graph_exit_task(tsk);
-	put_seccomp_filter(tsk);
 	arch_release_task_struct(tsk);
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
@@ -759,6 +758,7 @@ void __put_task_struct(struct task_struct *tsk)
 	exit_creds(tsk);
 	delayacct_tsk_free(tsk);
 	put_signal_struct(tsk->signal);
+	sched_core_free(tsk);
 
 	if (!profile_handoff_task(tsk))
 		free_task(tsk);
@@ -1701,6 +1701,7 @@ static inline void rcu_copy_process(struct task_struct *p)
 #endif /* #ifdef CONFIG_TASKS_RCU */
 #ifdef CONFIG_TASKS_TRACE_RCU
 	p->trc_reader_nesting = 0;
+	p->trc_reader_special.s = 0;
 	INIT_LIST_HEAD(&p->trc_holdout_list);
 #endif /* #ifdef CONFIG_TASKS_TRACE_RCU */
 }
@@ -2031,7 +2032,7 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cleanup_count;
 
 	delayacct_tsk_init(p);	/* Must remain after dup_task_struct() */
-	p->flags &= ~(PF_SUPERPRIV | PF_WQ_WORKER | PF_IDLE);
+	p->flags &= ~(PF_SUPERPRIV | PF_WQ_WORKER | PF_IDLE | PF_NO_SETAFFINITY);
 	p->flags |= PF_FORKNOEXEC;
 	INIT_LIST_HEAD(&p->children);
 	INIT_LIST_HEAD(&p->sibling);
@@ -2238,6 +2239,17 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cgroup_threadgroup_change_end;
 
 	/*
+	 * Now that the cgroups are pinned, re-clone the parent cgroup and put
+	 * the new task on the correct runqueue. All this *before* the task
+	 * becomes visible.
+	 *
+	 * This isn't part of ->can_fork() because while the re-cloning is
+	 * cgroup specific, it unconditionally needs to place the task on a
+	 * runqueue.
+	 */
+	sched_cgroup_fork(p);
+
+	/*
 	 * From this point on we must avoid any synchronous user-space
 	 * communication until we take the tasklist-lock. In particular, we do
 	 * not want user-space to be able to predict the process start-time by
@@ -2269,6 +2281,8 @@ static __latent_entropy struct task_struct *copy_process(
 	}
 
 	klp_copy_process(p);
+
+	sched_core_fork(p);
 
 	spin_lock(&current->sighand->siglock);
 
@@ -2344,6 +2358,7 @@ static __latent_entropy struct task_struct *copy_process(
 		fd_install(pidfd, pidfile);
 
 	proc_fork_connector(p);
+	sched_post_fork(p);
 	cgroup_post_fork(p);
 	cgroup_threadgroup_change_end(current);
 	perf_event_fork(p);
@@ -2356,6 +2371,7 @@ static __latent_entropy struct task_struct *copy_process(
 	return p;
 
 bad_fork_cancel_cgroup:
+	sched_core_free(p);
 	spin_unlock(&current->sighand->siglock);
 	write_unlock_irq(&tasklist_lock);
 	cgroup_cancel_fork(p);
@@ -2400,7 +2416,6 @@ bad_fork_cleanup_perf:
 	perf_event_free_task(p);
 bad_fork_cleanup_policy:
 	lockdep_free_task(p);
-	free_task_load_ptrs(p);
 #ifdef CONFIG_NUMA
 	mpol_put(p->mempolicy);
 bad_fork_cleanup_threadgroup_lock:
@@ -2410,7 +2425,7 @@ bad_fork_cleanup_count:
 	atomic_dec(&p->cred->user->processes);
 	exit_creds(p);
 bad_fork_free:
-	p->state = TASK_DEAD;
+	WRITE_ONCE(p->__state, TASK_DEAD);
 	put_task_stack(p);
 	delayed_free_task(p);
 fork_out:
@@ -2430,7 +2445,7 @@ static inline void init_idle_pids(struct task_struct *idle)
 	}
 }
 
-struct task_struct *fork_idle(int cpu)
+struct task_struct * __init fork_idle(int cpu)
 {
 	struct task_struct *task;
 	struct kernel_clone_args args = {

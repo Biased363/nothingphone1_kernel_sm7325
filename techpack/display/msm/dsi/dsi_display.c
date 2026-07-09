@@ -37,6 +37,8 @@
 
 #define SEC_PANEL_NAME_MAX_LEN  256
 
+struct dsi_display *primary_display;
+
 u8 dbgfs_tx_cmd_buf[SZ_4K];
 static char dsi_display_primary[MAX_CMDLINE_PARAM_LEN];
 static char dsi_display_secondary[MAX_CMDLINE_PARAM_LEN];
@@ -57,6 +59,8 @@ bool is_skip_op_required(struct dsi_display *display)
 
 	return (display->is_cont_splash_enabled || display->trusted_vm_env);
 }
+
+static unsigned int cur_refresh_rate = 60;
 
 static void dsi_display_mask_ctrl_error_interrupts(struct dsi_display *display,
 			u32 mask, bool enable)
@@ -5971,15 +5975,25 @@ static int dsi_display_init(struct dsi_display *display)
 		if (rc) {
 			DSI_ERR("[%s] failed to enable vregs, rc=%d\n",
 					display->panel->name, rc);
-			return rc;
+			goto vreg_fail;
 		}
 	}
 
 	rc = component_add(&pdev->dev, &dsi_display_comp_ops);
-	if (rc)
+	if (rc) {
 		DSI_ERR("component add failed, rc=%d\n", rc);
+		goto comp_add_fail;
+	}
 
 	DSI_DEBUG("component add success: %s\n", display->name);
+	return rc;
+
+comp_add_fail:
+	if (display->panel)
+		dsi_pwr_enable_regulator(&display->panel->power_info, false);
+vreg_fail:
+	_dsi_display_dev_deinit(display);
+
 end:
 	return rc;
 }
@@ -7156,10 +7170,13 @@ int dsi_display_get_modes(struct dsi_display *display,
 exit:
 	*out_modes = display->modes;
 	rc = 0;
+	primary_display = display;
 
 error:
-	if (rc)
+	if (rc) {
 		kfree(display->modes);
+		display->modes = NULL;
+	}
 
 	mutex_unlock(&display->display_lock);
 	return rc;
@@ -7379,6 +7396,10 @@ int dsi_display_validate_mode_change(struct dsi_display *display,
 					adj_mode->timing.h_front_porch,
 					cur_mode->timing.v_front_porch,
 					adj_mode->timing.v_front_porch);
+			}
+			if (cur_mode->timing.refresh_rate != adj_mode->timing.refresh_rate) {
+				WRITE_ONCE(cur_refresh_rate, adj_mode->timing.refresh_rate);
+				DSI_DEBUG("cur_refresh_rate set to %d\n", adj_mode->timing.refresh_rate);
 			}
 		}
 
@@ -8326,6 +8347,11 @@ static void dsi_display_panel_id_notification(struct dsi_display *display)
 	}
 }
 
+unsigned int dsi_panel_get_refresh_rate(void)
+{
+	return READ_ONCE(cur_refresh_rate);
+}
+
 int dsi_display_enable(struct dsi_display *display)
 {
 	int rc = 0;
@@ -8367,6 +8393,8 @@ int dsi_display_enable(struct dsi_display *display)
 	mutex_lock(&display->display_lock);
 
 	mode = display->panel->cur_mode;
+
+	WRITE_ONCE(cur_refresh_rate, mode->timing.refresh_rate);
 
 	if (mode->dsi_mode_flags & DSI_MODE_FLAG_DMS) {
 		rc = dsi_panel_post_switch(display->panel);
@@ -8777,6 +8805,10 @@ int dsi_display_unprepare(struct dsi_display *display)
 
 	SDE_EVT32(SDE_EVTLOG_FUNC_EXIT);
 	return rc;
+}
+
+struct dsi_display *get_main_display(void) {
+	return primary_display;
 }
 
 void __init dsi_display_register(void)
