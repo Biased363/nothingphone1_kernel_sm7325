@@ -836,8 +836,6 @@ overflow:
 	 * There's gotta be a limit -- if we're still failing at this point
 	 * there's really nothing much to be done about things.
 	 */
-	struct rb_node *node;
-
 	BUG_ON(cfs_rq->sum_shift >= 10);
 	cfs_rq->sum_shift++;
 
@@ -847,7 +845,7 @@ overflow:
 	cfs_rq->sum_w_vruntime = 0;
 	cfs_rq->sum_weight = 0;
 
-	for (node = cfs_rq->tasks_timeline.rb_leftmost;
+	for (struct rb_node *node = cfs_rq->tasks_timeline.rb_leftmost;
 	     node; node = rb_next(node))
 		__sum_w_vruntime_add(cfs_rq, __node_2_se(node));
 
