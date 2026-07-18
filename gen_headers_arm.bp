@@ -442,6 +442,7 @@ gen_headers_out_arm = [
     "linux/omap3isp.h",
     "linux/omapfb.h",
     "linux/oom.h",
+    "linux/openat2.h",
     "linux/openvswitch.h",
     "linux/packet_diag.h",
     "linux/param.h",
