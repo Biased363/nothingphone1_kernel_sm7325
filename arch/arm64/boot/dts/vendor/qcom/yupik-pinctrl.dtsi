@@ -3124,5 +3124,46 @@
 				};
 			};
 		};
+
+		/* AW869X/AW8692X Haptic Driver */
+		awinic_gpio_reset: awinic_gpio_reset {
+			mux {
+				pins = "gpio35";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio35";
+				drive-strength = <2>;
+				bias-pull-down;
+			};
+		};
+
+		awinic_gpio_reset_output_high: awinic_gpio_reset_output_high {
+			mux {
+				pins = "gpio35";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio35";
+				drive-strength = <2>;
+				output-high;
+				bias-pull-up;
+			};
+		};
+
+		awinic_gpio_int: awinic_gpio_int {
+			mux {
+				pins = "gpio18";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio18";
+				drive-strength = <2>;
+				bias-pull-up;
+			};
+		};
 	};
 };
