@@ -34,7 +34,8 @@
 #include <linux/mman.h>
 #define RICHTAP_NAME "aw8697_haptic"
 #undef dev_dbg
-#define dev_dbg(dev, fmt, ...) do { } while (0)
+#define dev_dbg dev_info
+#define HAP_PTN_FIFO_DIN_NUM 4
 #endif //RICHTAP_FOR_PMIC_ENABLE
 
 /* status register definitions in HAPTICS_CFG module */
@@ -516,31 +517,27 @@ enum {
 	RICHTAP_AW_8697 = 0x05,
 	RICHTAP_PMIC_8350BH = 0x06,
 };
-
 enum {
 	MMAP_BUF_DATA_VALID = 0x55,
 	MMAP_BUF_DATA_FINISHED = 0xAA,
 	MMAP_BUF_DATA_INVALID = 0xFF,
 };
-
-#define RICHTAP_IOCTL_GROUP	0x52
-#define RICHTAP_GET_HWINFO	_IO(RICHTAP_IOCTL_GROUP, 0x03)
-#define RICHTAP_SET_FREQ	_IO(RICHTAP_IOCTL_GROUP, 0x04)
-#define RICHTAP_SETTING_GAIN	_IO(RICHTAP_IOCTL_GROUP, 0x05)
-#define RICHTAP_OFF_MODE	_IO(RICHTAP_IOCTL_GROUP, 0x06)
-#define RICHTAP_TIMEOUT_MODE	_IO(RICHTAP_IOCTL_GROUP, 0x07)
-#define RICHTAP_RAM_MOD		_IO(RICHTAP_IOCTL_GROUP, 0x08)
-#define RICHTAP_RTP_MODE	_IO(RICHTAP_IOCTL_GROUP, 0x09)
-#define RICHTAP_STREAM_MODE	_IO(RICHTAP_IOCTL_GROUP, 0x0A)
-#define RICHTAP_UPDATE_RAM	_IO(RICHTAP_IOCTL_GROUP, 0x10)
-#define RICHTAP_GET_F0		_IO(RICHTAP_IOCTL_GROUP, 0x11)
-#define RICHTAP_STOP_MODE	_IO(RICHTAP_IOCTL_GROUP, 0x12)
-#define RICHTAP_F0_UPDATE	_IO(RICHTAP_IOCTL_GROUP, 0x13)
-
+#define RICHTAP_IOCTL_GROUP     0x52
+#define RICHTAP_GET_HWINFO      _IO(RICHTAP_IOCTL_GROUP, 0x03)
+#define RICHTAP_SET_FREQ        _IO(RICHTAP_IOCTL_GROUP, 0x04)
+#define RICHTAP_SETTING_GAIN    _IO(RICHTAP_IOCTL_GROUP, 0x05)
+#define RICHTAP_OFF_MODE        _IO(RICHTAP_IOCTL_GROUP, 0x06)
+#define RICHTAP_TIMEOUT_MODE    _IO(RICHTAP_IOCTL_GROUP, 0x07)
+#define RICHTAP_RAM_MODE        _IO(RICHTAP_IOCTL_GROUP, 0x08)
+#define RICHTAP_RTP_MODE        _IO(RICHTAP_IOCTL_GROUP, 0x09)
+#define RICHTAP_STREAM_MODE     _IO(RICHTAP_IOCTL_GROUP, 0x0A)
+#define RICHTAP_UPDATE_RAM      _IO(RICHTAP_IOCTL_GROUP, 0x10)
+#define RICHTAP_GET_F0          _IO(RICHTAP_IOCTL_GROUP, 0x11)
+#define RICHTAP_STOP_MODE       _IO(RICHTAP_IOCTL_GROUP, 0x12)
+#define RICHTAP_F0_UPDATE       _IO(RICHTAP_IOCTL_GROUP, 0x13)
 #define RICHTAP_MMAP_BUF_SIZE   1000
-#define RICHTAP_MMAP_PAGE_ORDER   2
+#define RICHTAP_MMAP_PAGE_ORDER 2
 #define RICHTAP_MMAP_BUF_SUM    16
-
 #pragma pack(4)
 struct mmap_buf_format {
 	uint8_t status;
@@ -552,7 +549,6 @@ struct mmap_buf_format {
 	uint8_t data[RICHTAP_MMAP_BUF_SIZE];
 };
 #pragma pack()
-
 #endif //RICHTAP_FOR_PMIC_ENABLE
 
 struct haptics_chip {
@@ -1579,21 +1575,20 @@ static int haptics_open_loop_drive_config(struct haptics_chip *chip, bool en)
 			dev_dbg(chip->dev, "Toggle CAL_EN in open-loop-VREG playing\n");
 		}
 #ifndef RICHTAP_FOR_PMIC_ENABLE
-	} else if (!is_haptics_external_powered(chip)) {
-		rc = haptics_masked_write(chip, chip->cfg_addr_base,
-				HAP_CFG_VSET_CFG_REG,
-				FORCE_VREG_RDY_BIT, 0);
-	}
+        } else {
+                rc = haptics_masked_write(chip, chip->cfg_addr_base,
+                                HAP_CFG_VSET_CFG_REG,
+                                FORCE_VREG_RDY_BIT, 0);
+        }
 #else
-	} else {
-		val = en ? FORCE_VREG_RDY_BIT : 0;
-		rc = haptics_masked_write(chip, chip->cfg_addr_base,
-				HAP_CFG_VSET_CFG_REG,
-				FORCE_VREG_RDY_BIT, val);
-	}
+        } else {
+                val = en ? FORCE_VREG_RDY_BIT : 0;
+                rc = haptics_masked_write(chip, chip->cfg_addr_base,
+                                                HAP_CFG_VSET_CFG_REG,
+                                                FORCE_VREG_RDY_BIT, val);
+        }
 #endif //RICHTAP_FOR_PMIC_ENABLE
-
-	return rc;
+        return rc;
 }
 
 #define BOOST_VREG_OFF_DELAY_SECONDS	2
@@ -2925,28 +2920,23 @@ static irqreturn_t fifo_empty_irq_handler(int irq, void *data)
 	u32 samples_left, fill;
 	u8 *samples, val;
 	int rc, num;
-
 #ifdef RICHTAP_FOR_PMIC_ENABLE
-	int16_t num_rt = 0;
-	int16_t num_val = 0;
+	int16_t num_rt = 0, num_val = 0;
+	int16_t pos = 0, retry = 3;
 #endif //RICHTAP_FOR_PMIC_ENABLE
-
 	rc = haptics_read(chip, chip->cfg_addr_base,
 			HAP_CFG_INT_RT_STS_REG, &val, 1);
 	if (rc < 0)
 		return IRQ_HANDLED;
 
-#ifdef RICHTAP_FOR_PMIC_ENABLE
 	if (!(val & FIFO_EMPTY_BIT)) {
+#ifdef RICHTAP_FOR_PMIC_ENABLE
 		haptics_get_fifo_fill_status(chip, &fill);
 		if ((atomic_read(&chip->richtap_mode)) && (fill < 24))
 			schedule_work(&chip->richtap_erase_work);
+#endif
 		return IRQ_HANDLED;
 	}
-#else
-	if (!(val & FIFO_EMPTY_BIT))
-		return IRQ_HANDLED;
-#endif
 
 	mutex_lock(&chip->play.lock);
 	status = &chip->play.fifo_status;
