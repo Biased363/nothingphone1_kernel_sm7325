@@ -34,7 +34,7 @@
 #include <linux/mman.h>
 #define RICHTAP_NAME "aw8697_haptic"
 #undef dev_dbg
-#define dev_dbg dev_info
+#define dev_dbg(dev, fmt, ...) do { } while (0)
 #define HAP_PTN_FIFO_DIN_NUM 4
 #endif //RICHTAP_FOR_PMIC_ENABLE
 
