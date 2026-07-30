@@ -42,6 +42,9 @@
 #include "lim_api.h"
 #include "lim_session_utils.h"
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+#include "wma_frame_inject.h"
+#endif
 #include "cds_utils.h"
 
 #if !defined(REMOVE_PKT_LOG)
@@ -3013,6 +3016,14 @@ int wma_peer_create_confirm_handler(void *handle, uint8_t *evt_param_info,
 
 	wma_debug("vdev:%d Peer create confirm for bssid: " QDF_MAC_ADDR_FMT,
 		  peer_create_rsp->vdev_id, QDF_MAC_ADDR_REF(peer_mac.bytes));
+
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (wma_injection_peer_create_response(
+		peer_create_rsp->vdev_id, peer_mac.bytes,
+		peer_create_rsp->status))
+		return 0;
+#endif
+
 	req_msg = wma_find_remove_req_msgtype(wma, peer_create_rsp->vdev_id,
 					      WMA_PEER_CREATE_REQ);
 	if (!req_msg) {
@@ -3088,6 +3099,12 @@ int wma_peer_delete_handler(void *handle, uint8_t *cmd_param_info,
 	}
 
 	WMI_MAC_ADDR_TO_CHAR_ARRAY(&event->peer_macaddr, macaddr);
+
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (wma_injection_peer_delete_response(event->vdev_id, macaddr))
+		return 0;
+#endif
+
 	wma_debug("Peer Delete Response, vdev %d Peer "QDF_MAC_ADDR_FMT,
 			event->vdev_id, QDF_MAC_ADDR_REF(macaddr));
 	wlan_roam_debug_log(event->vdev_id, DEBUG_PEER_DELETE_RESP,

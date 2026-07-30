@@ -74,6 +74,23 @@ static uint32_t hdd_get_next_session_id(void)
 	return qdf_atomic_inc_return(&g_injection_session_id);
 }
 
+static void hdd_injection_retry_work(void *arg)
+{
+	struct hdd_injection_ctx *injection_ctx = arg;
+	bool stopping;
+
+	if (!injection_ctx || cds_is_driver_recovering())
+		return;
+
+	qdf_spin_lock_bh(&injection_ctx->queue_lock);
+	stopping = injection_ctx->queue_stopping;
+	qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+	if (stopping)
+		return;
+
+	qdf_sched_work(0, &injection_ctx->queue_work);
+}
+
 /**
  * hdd_init_frame_injection() - Initialize frame injection for adapter
  * @adapter: HDD adapter
@@ -127,6 +144,7 @@ QDF_STATUS hdd_init_frame_injection(struct hdd_adapter *adapter)
 
 	/* Initialize other fields */
 	injection_ctx->is_monitor_mode = false;
+	injection_ctx->queue_stopping = false;
 	injection_ctx->adapter = adapter;
 	injection_ctx->wma_handle = cds_get_context(QDF_MODULE_ID_WMA);
 	if (!injection_ctx->wma_handle)
@@ -157,6 +175,22 @@ QDF_STATUS hdd_init_frame_injection(struct hdd_adapter *adapter)
 	/* Initialize work queue for processing injection requests */
 	qdf_create_work(0, &injection_ctx->queue_work, 
 			hdd_process_injection_queue_work, injection_ctx);
+
+	status = qdf_delayed_work_create(&injection_ctx->retry_work,
+					 hdd_injection_retry_work, injection_ctx);
+	if (QDF_IS_STATUS_ERROR(status)) {
+		hdd_inject_err("Failed to create injection retry work: %d", status);
+		qdf_destroy_work(NULL, &injection_ctx->queue_work);
+		qdf_timer_stop(&injection_ctx->recovery_ctx.recovery_timer);
+		qdf_timer_free(&injection_ctx->recovery_ctx.recovery_timer);
+		qdf_destroy_work(NULL,
+				 &injection_ctx->recovery_ctx.recovery_work);
+		hdd_deinit_injection_security_ctx(&injection_ctx->security_ctx);
+		qdf_spinlock_destroy(&injection_ctx->queue_lock);
+		qdf_list_destroy(&injection_ctx->injection_queue);
+		qdf_mem_free(injection_ctx);
+		return status;
+	}
 
 	/* Assign to adapter */
 	adapter->injection_ctx = injection_ctx;
@@ -199,9 +233,14 @@ QDF_STATUS hdd_deinit_frame_injection(struct hdd_adapter *adapter)
 	/* Remove debugfs entries for this adapter */
 	hdd_injection_remove_debugfs_entries(adapter);
 
-	/* Cancel any pending work */
+	/* Block worker self-requeue before synchronously cancelling work. */
+	qdf_spin_lock_bh(&injection_ctx->queue_lock);
+	injection_ctx->queue_stopping = true;
+	qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+	qdf_delayed_work_stop_sync(&injection_ctx->retry_work);
 	qdf_cancel_work(&injection_ctx->queue_work);
 	qdf_flush_work(&injection_ctx->queue_work);
+	qdf_delayed_work_destroy(&injection_ctx->retry_work);
 
 	/* Cancel recovery work and timer */
 	qdf_cancel_work(&injection_ctx->recovery_ctx.recovery_work);
@@ -245,6 +284,72 @@ QDF_STATUS hdd_deinit_frame_injection(struct hdd_adapter *adapter)
 	return QDF_STATUS_SUCCESS;
 }
 
+void hdd_frame_injection_ssr_quiesce(struct hdd_adapter *adapter)
+{
+	struct hdd_injection_ctx *injection_ctx;
+	struct inject_frame_req *req;
+	qdf_list_node_t *node;
+	QDF_STATUS status;
+	uint32_t dropped = 0;
+
+	if (!adapter || !adapter->injection_ctx)
+		return;
+
+	injection_ctx = adapter->injection_ctx;
+	qdf_spin_lock_bh(&injection_ctx->queue_lock);
+	injection_ctx->queue_stopping = true;
+	qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+
+	qdf_delayed_work_stop_sync(&injection_ctx->retry_work);
+	qdf_cancel_work(&injection_ctx->queue_work);
+	qdf_flush_work(&injection_ctx->queue_work);
+	qdf_cancel_work(&injection_ctx->recovery_ctx.recovery_work);
+	qdf_flush_work(&injection_ctx->recovery_ctx.recovery_work);
+	qdf_timer_stop(&injection_ctx->recovery_ctx.recovery_timer);
+
+	while (true) {
+		qdf_spin_lock_bh(&injection_ctx->queue_lock);
+		status = qdf_list_remove_front(&injection_ctx->injection_queue,
+					       &node);
+		qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+		if (QDF_IS_STATUS_ERROR(status))
+			break;
+
+		req = qdf_container_of(node, struct inject_frame_req, node);
+		if (req->frame_data)
+			qdf_mem_free(req->frame_data);
+		qdf_mem_free(req);
+		dropped++;
+	}
+
+	injection_ctx->wma_handle = NULL;
+	injection_ctx->recovery_ctx.recovery_in_progress = false;
+	injection_ctx->security_ctx.stats.frames_dropped += dropped;
+	hdd_inject_info("SSR quiesced injection queue: vdev=%u dropped=%u",
+			adapter->vdev_id, dropped);
+}
+
+void hdd_frame_injection_ssr_resume(struct hdd_adapter *adapter)
+{
+	struct hdd_injection_ctx *injection_ctx;
+	void *wma_handle;
+
+	if (!adapter || !adapter->injection_ctx)
+		return;
+
+	wma_handle = cds_get_context(QDF_MODULE_ID_WMA);
+	if (!wma_handle)
+		return;
+
+	injection_ctx = adapter->injection_ctx;
+	injection_ctx->wma_handle = wma_handle;
+	qdf_spin_lock_bh(&injection_ctx->queue_lock);
+	injection_ctx->queue_stopping = false;
+	qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+	hdd_inject_info("SSR resumed injection queue: vdev=%u",
+			adapter->vdev_id);
+}
+
 /**
  * hdd_frame_inject_enable() - Enable frame injection for adapter
  * @adapter: HDD adapter
@@ -264,7 +369,12 @@ QDF_STATUS hdd_frame_inject_enable(struct hdd_adapter *adapter)
 		return QDF_STATUS_E_INVAL;
 	}
 
+	if (cds_is_driver_recovering())
+		return QDF_STATUS_E_CANCELED;
+
 	injection_ctx = adapter->injection_ctx;
+	if (cds_is_driver_recovering())
+		return QDF_STATUS_E_CANCELED;
 	injection_ctx->is_monitor_mode = true;
 
 	hdd_inject_info("Frame injection enabled for adapter %pK", adapter);
@@ -483,6 +593,11 @@ QDF_STATUS hdd_process_frame_injection(struct hdd_adapter *adapter,
 	/* Queue frame for injection */
 	qdf_spin_lock_bh(&injection_ctx->queue_lock);
 
+	if (injection_ctx->queue_stopping || cds_is_driver_recovering()) {
+		qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+		return QDF_STATUS_E_CANCELED;
+	}
+
 	/* Check queue size limit */
 	if (qdf_list_size(&injection_ctx->injection_queue) >=
 	    injection_ctx->security_ctx.config.max_queue_size) {
@@ -625,6 +740,7 @@ void hdd_process_injection_queue_work(void *arg)
 	bool monitor_mode_active;
 	uint64_t total_latency;
 	QDF_STATUS wma_status;
+	bool retry;
 
 	if (!injection_ctx) {
 		hdd_inject_err("Invalid injection context");
@@ -636,6 +752,11 @@ void hdd_process_injection_queue_work(void *arg)
 	/* Process all queued requests */
 	while (true) {
 		qdf_spin_lock_bh(&injection_ctx->queue_lock);
+		if (injection_ctx->queue_stopping ||
+		    cds_is_driver_recovering()) {
+			qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+			break;
+		}
 		status = qdf_list_remove_front(&injection_ctx->injection_queue, &node);
 		qdf_spin_unlock_bh(&injection_ctx->queue_lock);
 
@@ -643,6 +764,13 @@ void hdd_process_injection_queue_work(void *arg)
 			break;
 
 		req = qdf_container_of(node, struct inject_frame_req, node);
+
+		if (cds_is_driver_recovering()) {
+			if (req->frame_data)
+				qdf_mem_free(req->frame_data);
+			qdf_mem_free(req);
+			break;
+		}
 
 		/* Update timing for processing start */
 		req->process_time = qdf_get_log_timestamp();
@@ -771,18 +899,43 @@ void hdd_process_injection_queue_work(void *arg)
 					}
 				} else {
 					/* Management or control frame: WMI mgmt TX */
-					wma_status = wma_queue_injection_frame(
-						(tp_wma_handle)injection_ctx->wma_handle, req,
-						tx_vdev_id);
+					if (tx_vdev_id == 0xff) {
+						hdd_inject_debug("Monitor injection vdev is temporarily unavailable");
+						wma_status = QDF_STATUS_E_AGAIN;
+					} else {
+						wma_status = wma_queue_injection_frame(
+							(tp_wma_handle)injection_ctx->wma_handle,
+							req, tx_vdev_id);
+					}
 				}
 			}
 inject_done:
+			retry = wma_status == QDF_STATUS_E_RESOURCES ||
+				wma_status == QDF_STATUS_E_AGAIN ||
+				wma_status == QDF_STATUS_E_BUSY;
+			if (retry) {
+				qdf_spin_lock_bh(&injection_ctx->queue_lock);
+				if (!injection_ctx->queue_stopping &&
+				    !cds_is_driver_recovering())
+					status = qdf_list_insert_front(
+						&injection_ctx->injection_queue,
+						&req->node);
+				else
+					status = QDF_STATUS_E_CANCELED;
+				qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+
+				if (QDF_IS_STATUS_SUCCESS(status)) {
+					qdf_delayed_work_start(
+						&injection_ctx->retry_work,
+						HDD_FRAME_INJECT_RETRY_DELAY_MS);
+					break;
+				}
+			}
 
 			/* Update timing for completion */
 			req->complete_time = qdf_get_log_timestamp();
 
 			if (QDF_IS_STATUS_SUCCESS(wma_status)) {
-				hdd_update_injection_stats(injection_ctx->adapter, HDD_INJECTION_STAT_FRAMES_TRANSMITTED, 1);
 
 				/* Calculate and update latency statistics */
 				total_latency = req->complete_time - req->submit_time;
@@ -795,15 +948,12 @@ inject_done:
 				hdd_inject_err("Failed to queue frame to WMA: %d", wma_status);
 			}
 		} else {
-			/* Fallback: just update statistics if WMA handle not available */
+			/* No lower-layer submission occurred. */
 			req->complete_time = qdf_get_log_timestamp();
-			hdd_update_injection_stats(injection_ctx->adapter, HDD_INJECTION_STAT_FRAMES_TRANSMITTED, 1);
-
-			/* Calculate and update latency statistics */
-			total_latency = req->complete_time - req->submit_time;
-			hdd_update_injection_latency(injection_ctx->adapter, total_latency);
-
-			hdd_inject_warn("WMA handle not available, simulating transmission");
+			hdd_update_injection_stats(injection_ctx->adapter,
+						   HDD_INJECTION_STAT_FRAMES_DROPPED,
+						   1);
+			hdd_inject_warn("WMA handle not available, dropping frame");
 		}
 
 		hdd_inject_debug("Processed injection request: session_id=%u",
@@ -1092,7 +1242,8 @@ QDF_STATUS hdd_recover_from_injection_error(struct hdd_adapter *adapter,
 
 	hdd_inject_debug("Starting error recovery: type=%d, code=%d", error_type, error_code);
 
-	if (!adapter || !adapter->injection_ctx) {
+	if (!adapter || !adapter->injection_ctx ||
+	    cds_is_driver_recovering()) {
 		hdd_inject_err("Invalid adapter or injection context");
 		return QDF_STATUS_E_INVAL;
 	}
@@ -1248,7 +1399,8 @@ QDF_STATUS hdd_reset_injection_state(struct hdd_adapter *adapter)
 
 	hdd_inject_debug("Resetting injection state for adapter %pK", adapter);
 
-	if (!adapter || !adapter->injection_ctx) {
+	if (!adapter || !adapter->injection_ctx ||
+	    cds_is_driver_recovering()) {
 		hdd_inject_err("Invalid adapter or injection context");
 		return QDF_STATUS_E_INVAL;
 	}
@@ -1612,6 +1764,12 @@ QDF_STATUS hdd_get_injection_stats(struct hdd_adapter *adapter,
 			stats->frames_dropped += wma_stats.frames_dropped;
 			stats->queue_overflows += wma_stats.queue_overflows;
 			stats->firmware_errors += wma_stats.fw_errors;
+			stats->command_submitted += wma_stats.command_submitted;
+			stats->tx_complete_ok += wma_stats.tx_complete_ok;
+			stats->tx_complete_no_ack += wma_stats.tx_complete_no_ack;
+			stats->tx_complete_discard += wma_stats.tx_complete_discard;
+			stats->tx_timeout += wma_stats.tx_timeout;
+			stats->peer_not_found += wma_stats.peer_not_found;
 
 			/* Update timing statistics */
 			if (wma_stats.frames_processed > 0) {

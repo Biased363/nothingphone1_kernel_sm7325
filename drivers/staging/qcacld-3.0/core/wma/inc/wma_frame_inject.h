@@ -95,7 +95,7 @@ struct wma_injection_fw_error_info {
 /**
  * struct wma_injection_queue_stats - WMA injection queue statistics
  * @frames_queued: Total frames queued
- * @frames_processed: Total frames processed
+ * @frames_processed: Frames confirmed by firmware with COMPLETE_OK
  * @frames_dropped: Frames dropped due to queue overflow
  * @queue_overflows: Number of queue overflow events
  * @max_queue_depth: Maximum queue depth reached
@@ -103,6 +103,12 @@ struct wma_injection_fw_error_info {
  * @fw_errors: Number of firmware errors
  * @fw_timeouts: Number of firmware timeouts
  * @fw_retries: Number of firmware retries
+ * @command_submitted: WMI management commands accepted by the host WMI layer
+ * @tx_complete_ok: Firmware completions reporting COMPLETE_OK
+ * @tx_complete_no_ack: Firmware completions reporting COMPLETE_NO_ACK
+ * @tx_complete_discard: Firmware completions reporting DISCARD
+ * @tx_timeout: Submitted commands with no completion before the timeout
+ * @peer_not_found: Unicast frames rejected because no associated peer exists
  * @last_fw_error: Information about last firmware error
  */
 struct wma_injection_queue_stats {
@@ -115,6 +121,12 @@ struct wma_injection_queue_stats {
 	uint64_t fw_errors;
 	uint64_t fw_timeouts;
 	uint64_t fw_retries;
+	uint64_t command_submitted;
+	uint64_t tx_complete_ok;
+	uint64_t tx_complete_no_ack;
+	uint64_t tx_complete_discard;
+	uint64_t tx_timeout;
+	uint64_t peer_not_found;
 	struct wma_injection_fw_error_info last_fw_error;
 };
 
@@ -143,6 +155,19 @@ QDF_STATUS wma_init_injection_queue(tp_wma_handle wma_handle);
 QDF_STATUS wma_deinit_injection_queue(tp_wma_handle wma_handle);
 
 /**
+ * wma_injection_ssr_resume() - Resume periodic injection maintenance after SSR
+ * @wma_handle: New WMA context
+ */
+void wma_injection_ssr_resume(tp_wma_handle wma_handle);
+
+bool wma_injection_peer_create_response(uint8_t vdev_id,
+					const uint8_t *peer_addr,
+					uint32_t fw_status);
+
+bool wma_injection_peer_delete_response(uint8_t vdev_id,
+					const uint8_t *peer_addr);
+
+/**
  * wma_injection_pre_stop_cleanup() - Destroy injection helper vdev before
  *                                     monitor mode stop
  * @wma_handle: WMA handle
@@ -154,23 +179,30 @@ QDF_STATUS wma_deinit_injection_queue(tp_wma_handle wma_handle);
 void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle);
 
 /**
- * wma_injection_notify_channel_change() - Re-tune injection helper vdev
+ * wma_injection_notify_channel_change() - Retarget the monitor TX helper
  * @wma_handle: WMA handle
  * @mon_vdev_id: Monitor vdev ID whose channel changed
  * @new_freq: New channel frequency in MHz
  *
- * Proactively re-tunes the hidden injection TX helper vdev to @new_freq
- * when the monitor channel changes.  Without this, the helper vdev stays
- * on the old channel until the next injection attempt detects the mismatch,
- * creating a brief window where injected frames go out on the wrong
- * frequency or are dropped by firmware.
+ * Drains and retargets a helper on a different frequency before the real
+ * monitor vdev is retuned. Submissions remain gated until the caller reports
+ * channel-switch completion. A failed transition releases the helper.
  *
- * Call this from the cfg80211 set_monitor_channel path after the channel
- * change has been committed to firmware.
+ * Return: QDF_STATUS_SUCCESS when no helper can retain the old channel
  */
-void wma_injection_notify_channel_change(tp_wma_handle wma_handle,
-					 uint8_t mon_vdev_id,
-					 uint32_t new_freq);
+QDF_STATUS wma_injection_notify_channel_change(tp_wma_handle wma_handle,
+					       uint8_t mon_vdev_id,
+					       uint32_t new_freq);
+
+/**
+ * wma_injection_complete_channel_change() - Resume helper submissions
+ * @wma_handle: WMA handle
+ * @mon_vdev_id: Monitor vdev whose restart completed
+ * @success: Whether the monitor restart completed successfully
+ */
+void wma_injection_complete_channel_change(tp_wma_handle wma_handle,
+					   uint8_t mon_vdev_id,
+					   bool success);
 
 /**
  * wma_queue_injection_frame() - Queue frame for injection
@@ -356,13 +388,40 @@ static inline QDF_STATUS wma_deinit_injection_queue(tp_wma_handle wma_handle)
 	return QDF_STATUS_SUCCESS;
 }
 
+static inline void wma_injection_ssr_resume(tp_wma_handle wma_handle)
+{
+}
+
+static inline bool
+wma_injection_peer_create_response(uint8_t vdev_id,
+				   const uint8_t *peer_addr,
+				   uint32_t fw_status)
+{
+	return false;
+}
+
+static inline bool
+wma_injection_peer_delete_response(uint8_t vdev_id,
+				   const uint8_t *peer_addr)
+{
+	return false;
+}
+
 static inline void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle)
 {
 }
 
-static inline void wma_injection_notify_channel_change(tp_wma_handle wma_handle,
+static inline QDF_STATUS wma_injection_notify_channel_change(tp_wma_handle wma_handle,
 						       uint8_t mon_vdev_id,
 						       uint32_t new_freq)
+{
+	return QDF_STATUS_SUCCESS;
+}
+
+static inline void
+wma_injection_complete_channel_change(tp_wma_handle wma_handle,
+				      uint8_t mon_vdev_id,
+				      bool success)
 {
 }
 
@@ -416,6 +475,37 @@ static inline QDF_STATUS wma_handle_injection_fw_response(tp_wma_handle wma_hand
 							   uint32_t status)
 {
 	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline QDF_STATUS
+wma_handle_firmware_injection_error(tp_wma_handle wma_handle,
+				     uint32_t error_code,
+				     uint8_t vdev_id,
+				     struct inject_frame_req *req)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline QDF_STATUS
+wma_retry_injection_frame(tp_wma_handle wma_handle,
+			  struct inject_frame_req *req,
+			  uint8_t vdev_id,
+			  enum wma_injection_fw_error_type error_type)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline QDF_STATUS
+wma_sync_firmware_injection_state(tp_wma_handle wma_handle,
+				   uint8_t vdev_id)
+{
+	return QDF_STATUS_E_NOSUPPORT;
+}
+
+static inline enum wma_injection_fw_error_type
+wma_translate_fw_injection_error(uint32_t fw_error_code)
+{
+	return WMA_INJECTION_FW_ERROR_NONE;
 }
 
 #endif /* FEATURE_FRAME_INJECTION_SUPPORT */

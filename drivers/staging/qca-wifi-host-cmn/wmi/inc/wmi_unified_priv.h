@@ -2010,6 +2010,13 @@ QDF_STATUS (*extract_pdev_qvit_event)(wmi_unified_t wmi_hdl,
 uint16_t (*wmi_set_htc_tx_tag)(wmi_unified_t wmi_handle,
 				wmi_buf_t buf, uint32_t cmd_id);
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+QDF_STATUS (*extract_peer_create_response_event)(
+			wmi_unified_t wmi_handle,
+			void *evt_buf,
+			struct wmi_host_peer_create_response_event *param);
+#endif
+
 QDF_STATUS (*extract_peer_delete_response_event)(
 			wmi_unified_t wmi_handle,
 			void *evt_buf,

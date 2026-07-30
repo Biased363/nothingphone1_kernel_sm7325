@@ -38,6 +38,7 @@
 #include <qdf_lock.h>
 #include <qdf_timer.h>
 #include <qdf_defer.h>
+#include <qdf_delayed_work.h>
 #include "wlan_hdd_frame_validate.h"
 #include "wlan_hdd_inject_security.h"
 #include "wlan_hdd_frame_inject_debug.h"
@@ -53,6 +54,9 @@ struct wireless_dev;
 
 /* Maximum number of frames in injection queue per adapter */
 #define HDD_FRAME_INJECT_MAX_QUEUE_SIZE  64
+
+/* Back off briefly when the WMA queue or channel transition is busy. */
+#define HDD_FRAME_INJECT_RETRY_DELAY_MS  2
 
 /* Default rate limit: frames per second */
 #define HDD_FRAME_INJECT_DEFAULT_RATE_LIMIT  100
@@ -213,6 +217,12 @@ struct inject_frame_req {
  * @rate_limit_hits: Rate limiting events
  * @queue_overflows: Queue overflow events
  * @firmware_errors: Firmware rejection count
+ * @command_submitted: WMI commands successfully submitted
+ * @tx_complete_ok: Firmware COMPLETE_OK count
+ * @tx_complete_no_ack: Firmware COMPLETE_NO_ACK count
+ * @tx_complete_discard: Firmware DISCARD count
+ * @tx_timeout: Firmware completion timeout count
+ * @peer_not_found: Unicast frames without a legitimate associated peer
  * @last_inject_time: Timestamp of last injection
  * @total_inject_time: Total time spent in injection (microseconds)
  */
@@ -225,6 +235,12 @@ struct injection_stats {
 	uint64_t rate_limit_hits;
 	uint64_t queue_overflows;
 	uint64_t firmware_errors;
+	uint64_t command_submitted;
+	uint64_t tx_complete_ok;
+	uint64_t tx_complete_no_ack;
+	uint64_t tx_complete_discard;
+	uint64_t tx_timeout;
+	uint64_t peer_not_found;
 	uint64_t last_inject_time;
 	uint64_t total_inject_time;
 	/* Performance monitoring fields */
@@ -358,6 +374,8 @@ struct hdd_injection_recovery_ctx {
  * @security_ctx: Security and rate limiting context
  * @is_monitor_mode: Flag indicating if adapter is in monitor mode
  * @queue_work: Work item for processing injection queue
+ * @retry_work: Delayed work used when WMA applies backpressure
+ * @queue_stopping: Queue teardown has blocked new work and retries
  * @adapter: Back pointer to HDD adapter
  * @wma_handle: WMA handle for firmware communication
  * @recovery_ctx: Error recovery context
@@ -369,6 +387,8 @@ struct hdd_injection_ctx {
 	struct injection_security_ctx security_ctx;
 	bool is_monitor_mode;
 	qdf_work_t queue_work;
+	struct qdf_delayed_work retry_work;
+	bool queue_stopping;
 	struct hdd_adapter *adapter;
 	void *wma_handle;
 	struct hdd_injection_recovery_ctx recovery_ctx;
@@ -451,6 +471,18 @@ QDF_STATUS hdd_init_frame_injection(struct hdd_adapter *adapter);
  * Return: QDF_STATUS_SUCCESS on success, error code on failure
  */
 QDF_STATUS hdd_deinit_frame_injection(struct hdd_adapter *adapter);
+
+/**
+ * hdd_frame_injection_ssr_quiesce() - Stop producers for SSR
+ * @adapter: HDD adapter
+ */
+void hdd_frame_injection_ssr_quiesce(struct hdd_adapter *adapter);
+
+/**
+ * hdd_frame_injection_ssr_resume() - Bind injection to the new WMA context
+ * @adapter: HDD adapter
+ */
+void hdd_frame_injection_ssr_resume(struct hdd_adapter *adapter);
 
 /**
  * hdd_frame_inject_enable() - Enable frame injection for adapter
@@ -667,6 +699,14 @@ static inline QDF_STATUS hdd_init_frame_injection(struct hdd_adapter *adapter)
 static inline QDF_STATUS hdd_deinit_frame_injection(struct hdd_adapter *adapter)
 {
 	return QDF_STATUS_SUCCESS;
+}
+
+static inline void hdd_frame_injection_ssr_quiesce(struct hdd_adapter *adapter)
+{
+}
+
+static inline void hdd_frame_injection_ssr_resume(struct hdd_adapter *adapter)
+{
 }
 
 static inline QDF_STATUS hdd_frame_inject_enable(struct hdd_adapter *adapter)
