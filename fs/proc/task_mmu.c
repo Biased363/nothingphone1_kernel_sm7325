@@ -21,7 +21,6 @@
 #include <linux/uaccess.h>
 #include <linux/pkeys.h>
 #include <linux/mm_inline.h>
-#include <linux/ctype.h>
 
 #include <asm/elf.h>
 #include <asm/tlb.h>
@@ -493,7 +492,6 @@ struct mem_size_stats {
 	u64 pss_shmem;
 	u64 pss_locked;
 	u64 swap_pss;
-	bool check_shmem_swap;
 };
 
 static void smaps_page_accumulate(struct mem_size_stats *mss,
@@ -574,15 +572,27 @@ static int smaps_pte_hole(unsigned long addr, unsigned long end,
 		struct mm_walk *walk)
 {
 	struct mem_size_stats *mss = walk->private;
+	struct vm_area_struct *vma = walk->vma;
 
-	mss->swap += shmem_partial_swap_usage(
-			walk->vma->vm_file->f_mapping, addr, end);
+	mss->swap += shmem_partial_swap_usage(walk->vma->vm_file->f_mapping,
+					      linear_page_index(vma, addr),
+					      linear_page_index(vma, end));
 
 	return 0;
 }
 #else
 #define smaps_pte_hole		NULL
 #endif /* CONFIG_SHMEM */
+
+static void smaps_pte_hole_lookup(unsigned long addr, struct mm_walk *walk)
+{
+#ifdef CONFIG_SHMEM
+	if (walk->ops->pte_hole) {
+		/* depth is not used */
+		smaps_pte_hole(addr, addr + PAGE_SIZE, walk);
+	}
+#endif
+}
 
 static void smaps_pte_entry(pte_t *pte, unsigned long addr,
 		struct mm_walk *walk)
@@ -614,18 +624,8 @@ static void smaps_pte_entry(pte_t *pte, unsigned long addr,
 			page = migration_entry_to_page(swpent);
 		else if (is_device_private_entry(swpent))
 			page = device_private_entry_to_page(swpent);
-	} else if (unlikely(IS_ENABLED(CONFIG_SHMEM) && mss->check_shmem_swap
-							&& pte_none(*pte))) {
-		page = find_get_entry(vma->vm_file->f_mapping,
-						linear_page_index(vma, addr));
-		if (!page)
-			return;
-
-		if (xa_is_value(page))
-			mss->swap += PAGE_SIZE;
-		else
-			put_page(page);
-
+	} else {
+		smaps_pte_hole_lookup(addr, walk);
 		return;
 	}
 
@@ -700,8 +700,15 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 {
 	/*
 	 * Don't forget to update Documentation/ on changes.
+	 *
+	 * The length of the second argument of mnemonics[]
+	 * needs to be 3 instead of previously set 2
+	 * (i.e. from [BITS_PER_LONG][2] to [BITS_PER_LONG][3])
+	 * to avoid spurious
+	 * -Werror=unterminated-string-initialization warning
+	 *  with GCC 15
 	 */
-	static const char mnemonics[BITS_PER_LONG][2] = {
+	static const char mnemonics[BITS_PER_LONG][3] = {
 		/*
 		 * In case if we meet a flag we don't know about.
 		 */
@@ -763,11 +770,8 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 	for (i = 0; i < BITS_PER_LONG; i++) {
 		if (!mnemonics[i][0])
 			continue;
-		if (vma->vm_flags & (1UL << i)) {
-			seq_putc(m, mnemonics[i][0]);
-			seq_putc(m, mnemonics[i][1]);
-			seq_putc(m, ' ');
-		}
+		if (vma->vm_flags & (1UL << i))
+			seq_printf(m, "%s ", mnemonics[i]);
 	}
 	seq_putc(m, '\n');
 }
@@ -820,8 +824,6 @@ static void smap_gather_stats(struct vm_area_struct *vma,
 	unsigned long end = VMA_PAD_START(vma);
 
 #ifdef CONFIG_SHMEM
-	/* In case of smaps_rollup, reset the value from previous vma */
-	mss->check_shmem_swap = false;
 	if (vma->vm_file && shmem_mapping(vma->vm_file->f_mapping)) {
 		/*
 		 * For shared or readonly shmem mappings we know that all
@@ -847,7 +849,6 @@ static void smap_gather_stats(struct vm_area_struct *vma,
 					end == vma->vm_end) {
 			mss->swap += shmem_swapped;
 		} else {
-			mss->check_shmem_swap = true;
 			walk_page_range(vma->vm_mm, vma->vm_start, end,
 					&smaps_shmem_walk_ops, mss);
 			return;
@@ -1231,7 +1232,6 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	enum clear_refs_types type;
-	struct mmu_gather tlb;
 	int itype;
 	int rv;
 
@@ -1276,7 +1276,6 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 			count = -EINTR;
 			goto out_mm;
 		}
-		tlb_gather_mmu(&tlb, mm, 0, -1);
 		if (type == CLEAR_REFS_SOFT_DIRTY) {
 			for (vma = mm->mmap; vma; vma = vma->vm_next) {
 				if (!(vma->vm_flags & VM_SOFTDIRTY))
@@ -1312,15 +1311,18 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 				break;
 			}
 
+			inc_tlb_flush_pending(mm);
 			mmu_notifier_range_init(&range, MMU_NOTIFY_SOFT_DIRTY,
 						0, NULL, mm, 0, -1UL);
 			mmu_notifier_invalidate_range_start(&range);
 		}
 		walk_page_range(mm, 0, mm->highest_vm_end, &clear_refs_walk_ops,
 				&cp);
-		if (type == CLEAR_REFS_SOFT_DIRTY)
+		if (type == CLEAR_REFS_SOFT_DIRTY) {
 			mmu_notifier_invalidate_range_end(&range);
-		tlb_finish_mmu(&tlb, 0, -1);
+			flush_tlb_mm(mm);
+			dec_tlb_flush_pending(mm);
+		}
 		up_read(&mm->mmap_sem);
 out_mm:
 		mmput(mm);
@@ -1768,20 +1770,8 @@ cont:
 		if (!page)
 			continue;
 
-		if (isolate_lru_page(compound_head(page)))
+		if (isolate_lru_page(page))
 			continue;
-
-		/* MADV_FREE clears pte dirty bit and then marks the page
-		 * lazyfree (clear SwapBacked). Inbetween if this lazyfreed page
-		 * is touched by user then it becomes dirty.  PPR in
-		 * shrink_page_list in try_to_unmap finds the page dirty, marks
-		 * it back as PageSwapBacked and skips reclaim. This can cause
-		 * isolated count mismatch.
-		 */
-		if (PageAnon(page) && !PageSwapBacked(page)) {
-			putback_lru_page(page);
-			continue;
-		}
 
 		list_add(&page->lru, &page_list);
 		inc_node_page_state(page, NR_ISOLATED_ANON +
@@ -1791,7 +1781,7 @@ cont:
 			break;
 	}
 	pte_unmap_unlock(pte - 1, ptl);
-	reclaim_pages_from_list(&page_list, vma);
+	reclaim_pages_from_list(&page_list);
 	if (addr != end)
 		goto cont;
 
@@ -1810,16 +1800,11 @@ static ssize_t reclaim_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	struct task_struct *task;
-	char buffer[200];
+	char buffer[PROC_NUMBUF];
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	enum reclaim_type type;
 	char *type_buf;
-	unsigned long start = 0;
-	unsigned long end = 0;
-	const struct mm_walk_ops reclaim_walk_ops = {
-		.pmd_entry = reclaim_pte_range,
-	};
 
 	memset(buffer, 0, sizeof(buffer));
 	if (count > sizeof(buffer) - 1)
@@ -1835,89 +1820,40 @@ static ssize_t reclaim_write(struct file *file, const char __user *buf,
 		type = RECLAIM_ANON;
 	else if (!strcmp(type_buf, "all"))
 		type = RECLAIM_ALL;
-	else if (isdigit(*type_buf))
-		type = RECLAIM_RANGE;
 	else
-		goto out_err;
-
-	if (type == RECLAIM_RANGE) {
-		char *token;
-		unsigned long long len, len_in, tmp;
-
-		token = strsep(&type_buf, " ");
-		if (!token)
-			goto out_err;
-		tmp = memparse(token, &token);
-		if (tmp & ~PAGE_MASK || tmp > ULONG_MAX)
-			goto out_err;
-		start = tmp;
-
-		token = strsep(&type_buf, " ");
-		if (!token)
-			goto out_err;
-		len_in = memparse(token, &token);
-		len = (len_in + ~PAGE_MASK) & PAGE_MASK;
-		if (len > ULONG_MAX)
-			goto out_err;
-		/*
-		 * Check to see whether len was rounded up from small -ve
-		 * to zero.
-		 */
-		if (len_in && !len)
-			goto out_err;
-
-		end = start + len;
-		if (end < start)
-			goto out_err;
-	}
+		return -EINVAL;
 
 	task = get_proc_task(file->f_path.dentry->d_inode);
 	if (!task)
 		return -ESRCH;
 
 	mm = get_task_mm(task);
-	if (!mm)
-		goto out;
+	if (mm) {
+		const struct mm_walk_ops reclaim_walk_ops = {
+			.pmd_entry = reclaim_pte_range,
+		};
 
-	down_read(&mm->mmap_sem);
-	if (type == RECLAIM_RANGE) {
-		vma = find_vma(mm, start);
-		while (vma) {
-			if (vma->vm_start > end)
-				break;
-			if (is_vm_hugetlb_page(vma))
-				continue;
-
-			walk_page_range(mm, max(vma->vm_start, start),
-					min(vma->vm_end, end),
-					&reclaim_walk_ops, vma);
-			vma = vma->vm_next;
-		}
-	} else {
+		down_read(&mm->mmap_sem);
 		for (vma = mm->mmap; vma; vma = vma->vm_next) {
+
 			if (is_vm_hugetlb_page(vma))
 				continue;
 
 			if (type == RECLAIM_ANON && vma->vm_file)
 				continue;
-
 			if (type == RECLAIM_FILE && !vma->vm_file)
 				continue;
 
 			walk_page_range(mm, vma->vm_start, vma->vm_end,
 					&reclaim_walk_ops, vma);
 		}
+		flush_tlb_mm(mm);
+		up_read(&mm->mmap_sem);
+		mmput(mm);
 	}
-
-	flush_tlb_mm(mm);
-	up_read(&mm->mmap_sem);
-	mmput(mm);
-out:
 	put_task_struct(task);
-	return count;
 
-out_err:
-	return -EINVAL;
+	return count;
 }
 
 const struct file_operations proc_reclaim_operations = {

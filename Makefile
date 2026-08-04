@@ -438,8 +438,8 @@ STRIP		= llvm-strip
 else
 CC		= $(CROSS_COMPILE)gcc
 LD		= $(CROSS_COMPILE)ld
-AR		= $(CROSS_COMPILE)ar
-NM		= $(CROSS_COMPILE)nm
+AR		?= $(CROSS_COMPILE)ar
+NM		?= $(CROSS_COMPILE)nm
 OBJCOPY		= $(CROSS_COMPILE)objcopy
 OBJDUMP		= $(CROSS_COMPILE)objdump
 READELF		= $(CROSS_COMPILE)readelf
@@ -667,6 +667,22 @@ ifdef need-config
 include include/config/auto.conf
 endif
 
+ifdef CONFIG_LTO_GCC
+CC_FLAGS_LTO	:= -flto=jobserver -fipa-pta -fno-fat-lto-objects \
+		   -fuse-linker-plugin -fwhole-program
+KBUILD_CFLAGS	+= $(CC_FLAGS_LTO)
+LTO_LDFLAGS	:= $(CC_FLAGS_LTO) -Wno-lto-type-mismatch -Wno-psabi \
+		   -Wno-stringop-overflow -Wno-stringop-overread \
+		   -flinker-output=nolto-rel
+LDFINAL		:= $(CONFIG_SHELL) $(srctree)/scripts/gcc-ld $(LTO_LDFLAGS)
+AR		:= $(CROSS_COMPILE)gcc-ar
+NM		:= $(CROSS_COMPILE)gcc-nm
+export CC_FLAGS_LTO LDFINAL
+else
+LDFINAL		:= $(LD)
+export LDFINAL
+endif
+
 ifeq ($(KBUILD_EXTMOD),)
 # Objects we will link into vmlinux / subdirs we need to visit
 init-y		:= init/
@@ -775,6 +791,34 @@ ifdef CONFIG_CC_WERROR
 KBUILD_CFLAGS  += -Werror
 endif
 
+ifdef CONFIG_POLLY_CLANG
+POLLY_FLAGS	:= -mllvm -polly \
+		   -mllvm -polly-ast-use-context \
+		   -mllvm -polly-invariant-load-hoisting \
+		   -mllvm -polly-run-inliner \
+		   -mllvm -polly-vectorizer=stripmine
+
+ifeq ($(shell test $(CONFIG_CLANG_VERSION) -gt 130000; echo $$?),0)
+POLLY_FLAGS	+= -mllvm -polly-loopfusion-greedy=1 \
+		   -mllvm -polly-reschedule=1 \
+		   -mllvm -polly-postopts=1
+else
+POLLY_FLAGS	+= -mllvm -polly-opt-fusion=max
+endif
+
+# Polly may optimise loops with dead paths beyound what the linker
+# can understand. This may negate the effect of the linker's DCE
+# so we tell Polly to perfom proven DCE on the loops it optimises
+# in order to preserve the overall effect of the linker's DCE.
+ifdef CONFIG_LD_DEAD_CODE_DATA_ELIMINATION
+POLLY_FLAGS	+= -mllvm -polly-run-dce
+endif
+
+KBUILD_CFLAGS	+= $(POLLY_FLAGS)
+KBUILD_AFLAGS	+= $(POLLY_FLAGS)
+KBUILD_LDFLAGS	+= $(POLLY_FLAGS)
+endif
+
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 KBUILD_CFLAGS	+= $(call cc-option,-fno-allow-store-data-races)
@@ -823,10 +867,11 @@ KBUILD_CFLAGS += $(call cc-disable-warning, undefined-optimized)
 KBUILD_CFLAGS += $(call cc-disable-warning, default-const-init-unsafe)
 else
 
-# Warn about unmarked fall-throughs in switch statement.
-# Disabled for clang while comment to attribute conversion happens and
-# https://github.com/ClangBuiltLinux/linux/issues/636 is discussed.
-KBUILD_CFLAGS += $(call cc-option,-Wimplicit-fallthrough,)
+# Harmless warns but too noisy due to GCC's notorious aggressiveness
+KBUILD_CFLAGS += $(call cc-disable-warning, address)
+KBUILD_CFLAGS += $(call cc-disable-warning, array-compare)
+KBUILD_CFLAGS += $(call cc-disable-warning, format)
+KBUILD_CFLAGS += $(call cc-disable-warning, implicit-fallthrough)
 endif
 
 # These warnings generated too much noise in a regular build.
@@ -952,13 +997,11 @@ CC_FLAGS_LTO_CLANG := -flto
 endif
 CC_FLAGS_LTO_CLANG += -fvisibility=default
 
-# Limit inlining across translation units to reduce binary size
-LD_FLAGS_LTO_CLANG := -mllvm -import-instr-limit=5
-
-KBUILD_LDFLAGS += $(LD_FLAGS_LTO_CLANG)
-KBUILD_LDFLAGS_MODULE += $(LD_FLAGS_LTO_CLANG)
-
 KBUILD_LDS_MODULE += $(srctree)/scripts/module-lto.lds
+# Set O3 optimization level for LTO
+KBUILD_LDFLAGS	+= --plugin-opt=O3
+else
+KBUILD_LDFLAGS	+= -O3
 endif
 
 ifdef CONFIG_LTO
@@ -989,7 +1032,7 @@ export CC_FLAGS_CFI
 endif
 
 # arch Makefile may override CC so keep this after arch Makefile is included
-NOSTDINC_FLAGS += -nostdinc -isystem $(shell $(CC) -print-file-name=include)
+NOSTDINC_FLAGS += -nostdinc
 
 # warn about C99 declaration after statement
 KBUILD_CFLAGS += -Wdeclaration-after-statement
@@ -1011,17 +1054,11 @@ KBUILD_CFLAGS += $(call cc-disable-warning, stringop-overflow)
 # Another good warning that we'll want to enable eventually
 KBUILD_CFLAGS += $(call cc-disable-warning, restrict)
 
-# Enabled with W=2, disabled by default as noisy
-KBUILD_CFLAGS += $(call cc-disable-warning, maybe-uninitialized)
-
 # disable invalid "can't wrap" optimizations for signed / pointers
 KBUILD_CFLAGS	+= $(call cc-option,-fno-strict-overflow)
 
 # Make sure -fstack-check isn't enabled (like gentoo apparently did)
 KBUILD_CFLAGS  += $(call cc-option,-fno-stack-check,)
-
-# conserve stack if available
-KBUILD_CFLAGS   += $(call cc-option,-fconserve-stack)
 
 # Prohibit date/time macros, which would make the build non-deterministic
 KBUILD_CFLAGS   += $(call cc-option,-Werror=date-time)

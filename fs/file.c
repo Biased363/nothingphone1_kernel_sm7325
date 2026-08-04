@@ -257,15 +257,15 @@ repeat:
 	return expanded;
 }
 
-static inline void __set_close_on_exec(unsigned int fd, struct fdtable *fdt)
+static inline void __set_close_on_exec(unsigned int fd, struct fdtable *fdt,
+				       bool set)
 {
-	__set_bit(fd, fdt->close_on_exec);
-}
-
-static inline void __clear_close_on_exec(unsigned int fd, struct fdtable *fdt)
-{
-	if (test_bit(fd, fdt->close_on_exec))
-		__clear_bit(fd, fdt->close_on_exec);
+	if (set) {
+		__set_bit(fd, fdt->close_on_exec);
+	} else {
+		if (test_bit(fd, fdt->close_on_exec))
+			__clear_bit(fd, fdt->close_on_exec);
+	}
 }
 
 static inline void __set_open_fd(unsigned int fd, struct fdtable *fdt)
@@ -550,10 +550,7 @@ repeat:
 		files->next_fd = fd + 1;
 
 	__set_open_fd(fd, fdt);
-	if (flags & O_CLOEXEC)
-		__set_close_on_exec(fd, fdt);
-	else
-		__clear_close_on_exec(fd, fdt);
+	__set_close_on_exec(fd, fdt, flags & O_CLOEXEC);
 	error = fd;
 #if 1
 	/* Sanity check */
@@ -648,18 +645,33 @@ void fd_install(unsigned int fd, struct file *file)
 
 EXPORT_SYMBOL(fd_install);
 
+/**
+ * pick_file - return file associatd with fd
+ * @files: file struct to retrieve file from
+ * @fd: file descriptor to retrieve file for
+ *
+ * If this functions returns an EINVAL error pointer the fd was beyond the
+ * current maximum number of file descriptors for that fdtable.
+ *
+ * Returns: The file associated with @fd, on error returns an error pointer.
+ */
 static struct file *pick_file(struct files_struct *files, unsigned fd)
 {
-	struct file *file = NULL;
+	struct file *file;
 	struct fdtable *fdt;
 
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
-	if (fd >= fdt->max_fds)
+	if (fd >= fdt->max_fds) {
+		file = ERR_PTR(-EINVAL);
 		goto out_unlock;
+	}
+	fd = array_index_nospec(fd, fdt->max_fds);
 	file = fdt->fd[fd];
-	if (!file)
+	if (!file) {
+		file = ERR_PTR(-EBADF);
 		goto out_unlock;
+	}
 	rcu_assign_pointer(fdt->fd[fd], NULL);
 	__put_unused_fd(files, fd);
 
@@ -676,7 +688,7 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	struct file *file;
 
 	file = pick_file(files, fd);
-	if (!file)
+	if (IS_ERR(file))
 		return -EBADF;
 
 	return filp_close(file, files);
@@ -717,24 +729,31 @@ static inline void __range_close(struct files_struct *cur_fds, unsigned int fd,
 		struct file *file;
 
 		file = pick_file(cur_fds, fd++);
-		if (!file)
+		if (!IS_ERR(file)) {
+			/* found a valid file to close */
+			filp_close(file, cur_fds);
+			cond_resched();
 			continue;
+		}
 
-		filp_close(file, cur_fds);
-		cond_resched();
+		/* beyond the last fd in that table */
+		if (PTR_ERR(file) == -EINVAL)
+			return;
 	}
 }
 
 /**
- * __close_range() - Close all file descriptors in a given range.
+ * sys_close_range() - Close all file descriptors in a given range.
  *
  * @fd:     starting file descriptor to close
  * @max_fd: last file descriptor to close
  *
  * This closes a range of file descriptors. All file descriptors
  * from @fd up to and including @max_fd are closed.
+ * Currently, errors to close a given file descriptor are ignored.
  */
-int __close_range(unsigned fd, unsigned max_fd, unsigned int flags)
+SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
+		unsigned int, flags)
 {
 	struct task_struct *me = current;
 	struct files_struct *cur_fds = me->files, *fds = NULL;
@@ -980,16 +999,44 @@ unsigned long __fdget_raw(unsigned int fd)
 	return __fget_light(fd, 0);
 }
 
+/*
+ * Try to avoid f_pos locking. We only need it if the
+ * file is marked for FMODE_ATOMIC_POS, and it can be
+ * accessed multiple ways.
+ *
+ * Always do it for directories, because pidfd_getfd()
+ * can make a file accessible even if it otherwise would
+ * not be, and for directories this is a correctness
+ * issue, not a "POSIX requirement".
+ */
+static inline bool file_needs_f_pos_lock(struct file *file)
+{
+	return (file->f_mode & FMODE_ATOMIC_POS) &&
+		(file_count(file) > 1 || file->f_op->iterate_shared);
+}
+
+bool file_seek_cur_needs_f_lock(struct file *file)
+{
+	if (!(file->f_mode & FMODE_ATOMIC_POS) && !file->f_op->iterate_shared)
+		return false;
+
+	/*
+	 * Note that we are not guaranteed to be called after fdget_pos() on
+	 * this file obj, in which case the caller is expected to provide the
+	 * appropriate locking.
+	 */
+
+	return true;
+}
+
 unsigned long __fdget_pos(unsigned int fd)
 {
 	unsigned long v = __fdget(fd);
 	struct file *file = (struct file *)(v & ~3);
 
-	if (file && (file->f_mode & FMODE_ATOMIC_POS)) {
-		if (file_count(file) > 1) {
-			v |= FDPUT_POS_UNLOCK;
-			mutex_lock(&file->f_pos_lock);
-		}
+	if (file && file_needs_f_pos_lock(file)) {
+		v |= FDPUT_POS_UNLOCK;
+		mutex_lock(&file->f_pos_lock);
 	}
 	return v;
 }
@@ -1008,13 +1055,8 @@ void __f_unlock_pos(struct file *f)
 void set_close_on_exec(unsigned int fd, int flag)
 {
 	struct files_struct *files = current->files;
-	struct fdtable *fdt;
 	spin_lock(&files->file_lock);
-	fdt = files_fdtable(files);
-	if (flag)
-		__set_close_on_exec(fd, fdt);
-	else
-		__clear_close_on_exec(fd, fdt);
+	__set_close_on_exec(fd, files_fdtable(files), flag);
 	spin_unlock(&files->file_lock);
 }
 
@@ -1059,10 +1101,7 @@ __releases(&files->file_lock)
 	get_file(file);
 	rcu_assign_pointer(fdt->fd[fd], file);
 	__set_open_fd(fd, fdt);
-	if (flags & O_CLOEXEC)
-		__set_close_on_exec(fd, fdt);
-	else
-		__clear_close_on_exec(fd, fdt);
+	__set_close_on_exec(fd, fdt, flags & O_CLOEXEC);
 	spin_unlock(&files->file_lock);
 
 	if (tofree)

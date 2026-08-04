@@ -45,12 +45,6 @@
 	(typeof(ptr)) (__ptr + (off));					\
 })
 
-/*
- * A trick to suppress uninitialized variable warning without generating any
- * code
- */
-#define uninitialized_var(x) x = x
-
 #ifdef CONFIG_RETPOLINE
 #define __noretpoline __attribute__((__indirect_branch__("keep")))
 #endif
@@ -130,6 +124,11 @@
 #define __no_sanitize_address __attribute__((no_sanitize_address))
 #else
 #define __no_sanitize_address
+#endif
+
+#if GCC_VERSION >= 50000
+/* Avoid reordering a top level statement */
+#define __noreorder    __attribute__((no_reorder))
 #endif
 
 #if GCC_VERSION >= 50100

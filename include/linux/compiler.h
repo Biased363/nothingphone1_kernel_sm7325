@@ -327,6 +327,24 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 #include <asm/barrier.h>
 #include <linux/kasan-checks.h>
 
+/**
+ * data_race - mark an expression as containing intentional data races
+ *
+ * This data_race() macro is useful for situations in which data races
+ * should be forgiven.  One example is diagnostic code that accesses
+ * shared variables but is not a part of the core synchronization design.
+ *
+ * This macro *does not* affect normal code generation, but is a hint
+ * to tooling that data races here are to be ignored.
+ */
+#define data_race(expr)							\
+({									\
+	({								\
+		__unqual_scalar_typeof(({ expr; })) __v = ({ expr; });	\
+		__v;							\
+	});								\
+})
+
 #define __READ_ONCE(x, check)						\
 ({									\
 	union { typeof(x) __val; char __c[1]; } __u;			\
@@ -423,6 +441,10 @@ static inline void *offset_to_ptr(const int *off)
 #define compiletime_assert_atomic_type(t)				\
 	compiletime_assert(__native_word(t),				\
 		"Need native word sized stores/loads for atomicity.")
+
+#ifndef __noreorder
+#define __noreorder
+#endif
 
 /* &a[0] degrades to a pointer: a different type from an array */
 #define __must_be_array(a)	BUILD_BUG_ON_ZERO(__same_type((a), &(a)[0]))

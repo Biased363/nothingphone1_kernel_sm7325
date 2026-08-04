@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -189,6 +190,9 @@ static int a6xx_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 
 	icc_set_bw(pwr->icc_path, 0, MBps_to_icc(pwr->ddr_table[level]));
 
+	/* Clear any hwsched faults that might have been left over */
+	adreno_hwsched_clear_fault(adreno_dev);
+
 	ret = a6xx_gmu_device_start(adreno_dev);
 	if (ret)
 		goto err;
@@ -256,6 +260,9 @@ static int a6xx_hwsched_gmu_boot(struct adreno_device *adreno_dev)
 
 	a6xx_gmu_irq_enable(adreno_dev);
 
+	/* Clear any hwsched faults that might have been left over */
+	adreno_hwsched_clear_fault(adreno_dev);
+
 	ret = a6xx_gmu_device_start(adreno_dev);
 	if (ret)
 		goto err;
@@ -291,7 +298,7 @@ gdsc_off:
 	return ret;
 }
 
-static void a6xx_hwsched_active_count_put(struct adreno_device *adreno_dev)
+void a6xx_hwsched_active_count_put(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 
@@ -392,6 +399,8 @@ static int a6xx_hwsched_gmu_power_off(struct adreno_device *adreno_dev)
 
 	a6xx_rdpm_cx_freq_update(gmu, 0);
 
+	kgsl_pwrctrl_set_state(device, KGSL_STATE_NONE);
+
 	return ret;
 
 error:
@@ -405,9 +414,6 @@ static int a6xx_hwsched_gpu_boot(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	int ret;
-
-	/* Clear any GPU faults that might have been left over */
-	adreno_clear_gpu_fault(adreno_dev);
 
 	ret = kgsl_mmu_start(device);
 	if (ret)
@@ -586,6 +592,17 @@ static int a6xx_hwsched_first_boot(struct adreno_device *adreno_dev)
 	set_bit(GMU_PRIV_FIRST_BOOT_DONE, &gmu->flags);
 	set_bit(GMU_PRIV_GPU_STARTED, &gmu->flags);
 
+	/*
+	 * BCL needs respective Central Broadcast register to
+	 * be programed from TZ. This programing happens only
+	 * when zap shader firmware load is successful. Zap firmware
+	 * load can fail in boot up path hence enable BCL only after we
+	 * successfully complete first boot to ensure that Central
+	 * Broadcast register was programed before enabling BCL.
+	 */
+	if (ADRENO_FEATURE(adreno_dev, ADRENO_BCL))
+		adreno_dev->bcl_enabled = true;
+
 	device->pwrctrl.last_stat_updated = ktime_get();
 	device->state = KGSL_STATE_ACTIVE;
 
@@ -607,9 +624,6 @@ static int a6xx_hwsched_power_off(struct adreno_device *adreno_dev)
 
 	/* process any profiling results that are available */
 	adreno_profile_process_results(ADRENO_DEVICE(device));
-
-	if (!a6xx_hw_isidle(adreno_dev))
-		dev_err(&gmu->pdev->dev, "GPU isn't idle before SLUMBER\n");
 
 	ret = a6xx_gmu_oob_set(device, oob_gpu);
 	if (ret) {
@@ -646,15 +660,13 @@ no_gx_power:
 
 	clear_bit(GMU_PRIV_GPU_STARTED, &gmu->flags);
 
-	device->state = KGSL_STATE_NONE;
-
 	del_timer_sync(&device->idle_timer);
 
 	kgsl_pwrscale_sleep(device);
 
 	kgsl_pwrctrl_clear_l3_vote(device);
 
-	trace_kgsl_pwr_set_state(device, KGSL_STATE_SLUMBER);
+	kgsl_pwrctrl_set_state(device, KGSL_STATE_SLUMBER);
 
 	return ret;
 }
@@ -670,7 +682,12 @@ static void hwsched_idle_check(struct work_struct *work)
 	if (test_bit(GMU_DISABLE_SLUMBER, &device->gmu_core.flags))
 		goto done;
 
-	if (!atomic_read(&device->active_cnt)) {
+	if (!atomic_read(&device->active_cnt) &&
+		time_is_before_eq_jiffies(device->idle_jiffies)) {
+		if (!a6xx_hw_isidle(adreno_dev)) {
+			dev_err(device->dev, "GPU isn't idle before SLUMBER\n");
+			gmu_fault_snapshot(device);
+		}
 		a6xx_hwsched_power_off(adreno_dev);
 	} else {
 		kgsl_pwrscale_update(device);
@@ -705,7 +722,7 @@ static int a6xx_hwsched_first_open(struct adreno_device *adreno_dev)
 	return 0;
 }
 
-static int a6xx_hwsched_active_count_get(struct adreno_device *adreno_dev)
+int a6xx_hwsched_active_count_get(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);

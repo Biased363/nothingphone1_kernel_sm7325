@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -21,7 +21,6 @@
 
 #include "adreno.h"
 #include "adreno_a6xx.h"
-#include "adreno_hwsched.h"
 #include "adreno_trace.h"
 #include "kgsl_bus.h"
 #include "kgsl_device.h"
@@ -84,6 +83,19 @@ static struct gmu_vma_entry a6xx_gmu_vma[] = {
 			.size = SZ_512M,
 			.next_va = 0x60000000
 		},
+};
+
+static u32 a6xx_rscc_tcsm_drv0_status_reglist[] = {
+	A6XX_RSCC_TCS0_DRV0_STATUS,
+	A6XX_RSCC_TCS1_DRV0_STATUS,
+	A6XX_RSCC_TCS2_DRV0_STATUS,
+	A6XX_RSCC_TCS3_DRV0_STATUS,
+	A6XX_RSCC_TCS4_DRV0_STATUS,
+	A6XX_RSCC_TCS5_DRV0_STATUS,
+	A6XX_RSCC_TCS6_DRV0_STATUS,
+	A6XX_RSCC_TCS7_DRV0_STATUS,
+	A6XX_RSCC_TCS8_DRV0_STATUS,
+	A6XX_RSCC_TCS9_DRV0_STATUS,
 };
 
 static int timed_poll_check_rscc(struct kgsl_device *device,
@@ -888,19 +900,20 @@ static int a6xx_gmu_dcvs_nohfi(struct kgsl_device *device,
 	return ret;
 }
 
-static int a6xx_complete_rpmh_votes(struct adreno_device *adreno_dev)
+static int a6xx_complete_rpmh_votes(struct adreno_device *adreno_dev,
+		unsigned int timeout)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
-	int ret = 0;
+	int i, ret = 0;
 
-	ret |= timed_poll_check_rscc(device, A6XX_RSCC_TCS0_DRV0_STATUS,
-			BIT(0), GPU_RESET_TIMEOUT, BIT(0));
-	ret |= timed_poll_check_rscc(device, A6XX_RSCC_TCS1_DRV0_STATUS,
-			BIT(0), GPU_RESET_TIMEOUT, BIT(0));
-	ret |= timed_poll_check_rscc(device, A6XX_RSCC_TCS2_DRV0_STATUS,
-			BIT(0), GPU_RESET_TIMEOUT, BIT(0));
-	ret |= timed_poll_check_rscc(device, A6XX_RSCC_TCS3_DRV0_STATUS,
-			BIT(0), GPU_RESET_TIMEOUT, BIT(0));
+	for (i = 0; i < 4; i++)
+		ret |= timed_poll_check_rscc(device, a6xx_rscc_tcsm_drv0_status_reglist[i],
+				BIT(0), timeout, BIT(0));
+
+	if (adreno_is_a650_family(adreno_dev))
+		for (; i < ARRAY_SIZE(a6xx_rscc_tcsm_drv0_status_reglist); i++)
+			ret |= timed_poll_check_rscc(device, a6xx_rscc_tcsm_drv0_status_reglist[i],
+					BIT(0), timeout, BIT(0));
 
 	return ret;
 }
@@ -1606,7 +1619,7 @@ static void a6xx_gmu_pwrctrl_suspend(struct adreno_device *adreno_dev)
 	/* Disconnect GPU from BUS is not needed if CX GDSC goes off later */
 
 	/* Check no outstanding RPMh voting */
-	a6xx_complete_rpmh_votes(adreno_dev);
+	a6xx_complete_rpmh_votes(adreno_dev, GPU_RESET_TIMEOUT);
 
 	/* Clear the WRITEDROPPED fields and set fence to allow mode */
 	gmu_core_regwrite(device, A6XX_GMU_AHB_FENCE_STATUS_CLR, 0x7);
@@ -2159,6 +2172,9 @@ static int a6xx_gmu_first_boot(struct adreno_device *adreno_dev)
 	level = pwr->pwrlevels[pwr->default_pwrlevel].bus_min;
 	icc_set_bw(pwr->icc_path, 0, kBps_to_icc(pwr->ddr_table[level]));
 
+	/* Clear any GPU faults that might have been left over */
+	adreno_clear_gpu_fault(adreno_dev);
+
 	ret = a6xx_gmu_device_start(adreno_dev);
 	if (ret)
 		goto err;
@@ -2251,6 +2267,9 @@ static int a6xx_gmu_boot(struct adreno_device *adreno_dev)
 	a6xx_gmu_register_config(adreno_dev);
 
 	a6xx_gmu_irq_enable(adreno_dev);
+
+	/* Clear any GPU faults that might have been left over */
+	adreno_clear_gpu_fault(adreno_dev);
 
 	ret = a6xx_gmu_device_start(adreno_dev);
 	if (ret)
@@ -2742,6 +2761,8 @@ int a6xx_halt_gbif(struct adreno_device *adreno_dev)
 	return ret;
 }
 
+#define RPMH_VOTE_TIMEOUT		2 /* ms */
+
 static int a6xx_gmu_power_off(struct adreno_device *adreno_dev)
 {
 	struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);
@@ -2754,6 +2775,10 @@ static int a6xx_gmu_power_off(struct adreno_device *adreno_dev)
 
 	/* Wait for the lowest idle level we requested */
 	ret = a6xx_gmu_wait_for_lowest_idle(adreno_dev);
+	if (ret)
+		goto error;
+
+	ret = a6xx_complete_rpmh_votes(adreno_dev, RPMH_VOTE_TIMEOUT);
 	if (ret)
 		goto error;
 
@@ -2823,9 +2848,6 @@ static int a6xx_gpu_boot(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	int ret;
-
-	/* Clear any GPU faults that might have been left over */
-	adreno_clear_gpu_fault(adreno_dev);
 
 	adreno_set_active_ctxs_null(adreno_dev);
 
@@ -2904,7 +2926,8 @@ static int a6xx_boot(struct adreno_device *adreno_dev)
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	int ret;
 
-	WARN_ON(test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags));
+	if (WARN_ON(test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags)))
+		return 0;
 
 	trace_kgsl_pwr_request_state(device, KGSL_STATE_ACTIVE);
 
@@ -2936,8 +2959,12 @@ static int a6xx_first_boot(struct adreno_device *adreno_dev)
 	int ret;
 	unsigned long priv = 0;
 
-	if (test_bit(GMU_PRIV_FIRST_BOOT_DONE, &gmu->flags))
-		return a6xx_boot(adreno_dev);
+	if (test_bit(GMU_PRIV_FIRST_BOOT_DONE, &gmu->flags)) {
+		if (!test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags))
+			return a6xx_boot(adreno_dev);
+
+		return 0;
+	}
 
 	place_marker("M - DRIVER ADRENO Init");
 
@@ -3051,6 +3078,11 @@ static int a6xx_power_off(struct adreno_device *adreno_dev)
 		goto no_gx_power;
 	}
 
+	if (adreno_irq_pending(adreno_dev)) {
+		a6xx_gmu_oob_clear(device, oob_gpu);
+		return -EBUSY;
+	}
+
 	kgsl_pwrscale_update_stats(device);
 
 	/* Save active coresight registers if applicable */
@@ -3106,29 +3138,36 @@ static void gmu_idle_check(struct work_struct *work)
 					struct kgsl_device, idle_check_ws);
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);
+	int ret;
 
 	mutex_lock(&device->mutex);
 
 	if (test_bit(GMU_DISABLE_SLUMBER, &device->gmu_core.flags))
 		goto done;
 
-	if (!atomic_read(&device->active_cnt)) {
-		if (test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags)) {
-			spin_lock(&device->submit_lock);
+	if (atomic_read(&device->active_cnt) || time_is_after_jiffies(device->idle_jiffies)) {
+		kgsl_pwrscale_update(device);
+		kgsl_start_idle_timer(device);
+		goto done;
+	}
 
-			if (device->submit_now) {
-				spin_unlock(&device->submit_lock);
-				kgsl_pwrscale_update(device);
-				kgsl_start_idle_timer(device);
-				goto done;
-			}
+	if (!test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags))
+		goto done;
 
-			device->slumber = true;
-			spin_unlock(&device->submit_lock);
+	spin_lock(&device->submit_lock);
 
-			a6xx_power_off(adreno_dev);
-		}
-	} else {
+	if (device->submit_now) {
+		spin_unlock(&device->submit_lock);
+		kgsl_pwrscale_update(device);
+		kgsl_start_idle_timer(device);
+		goto done;
+	}
+
+	device->slumber = true;
+	spin_unlock(&device->submit_lock);
+
+	ret = a6xx_power_off(adreno_dev);
+	if (ret == -EBUSY) {
 		kgsl_pwrscale_update(device);
 		kgsl_start_idle_timer(device);
 	}
@@ -3287,7 +3326,6 @@ static void a6xx_gmu_touch_wakeup(struct adreno_device *adreno_dev)
 	device->pwrctrl.last_stat_updated = ktime_get();
 
 	kgsl_pwrctrl_set_state(device, KGSL_STATE_ACTIVE);
-
 }
 
 const struct adreno_power_ops a6xx_gmu_power_ops = {

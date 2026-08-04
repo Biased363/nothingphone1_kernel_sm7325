@@ -134,9 +134,6 @@ static const char * const resident_page_types[] = {
 	NAMED_ARRAY_INDEX(MM_ANONPAGES),
 	NAMED_ARRAY_INDEX(MM_SWAPENTS),
 	NAMED_ARRAY_INDEX(MM_SHMEMPAGES),
-#ifdef CONFIG_MM_STAT_UNRECLAIMABLE_PAGES
-	NAMED_ARRAY_INDEX(MM_UNRECLAIMABLE),
-#endif
 };
 
 DEFINE_PER_CPU(unsigned long, process_counts) = 0;
@@ -665,15 +662,7 @@ static void check_mm(struct mm_struct *mm)
 			 "Please make sure 'struct resident_page_types[]' is updated as well");
 
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
-		long x;
-
-#ifdef CONFIG_MM_STAT_UNRECLAIMABLE_PAGES
-		/* MM_UNRECLAIMABLE could be freed later in exit_files */
-		if (i == MM_UNRECLAIMABLE)
-			continue;
-#endif
-
-		x = atomic_long_read(&mm->rss_stat.count[i]);
+		long x = atomic_long_read(&mm->rss_stat.count[i]);
 
 		if (unlikely(x))
 			pr_alert("BUG: Bad rss-counter state mm:%p type:%s val:%ld\n",

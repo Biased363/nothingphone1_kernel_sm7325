@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2011-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/bitfield.h>
@@ -2211,14 +2211,37 @@ out:
 	return ret;
 }
 
+static int get_gpuaddr(struct kgsl_pagetable *pagetable,
+		struct kgsl_memdesc *memdesc, u64 start, u64 end,
+		u64 size, u64 align)
+{
+	u64 addr;
+	int ret;
+
+	spin_lock(&pagetable->lock);
+	addr = _get_unmapped_area(pagetable, start, end, size, align);
+	if (addr == (u64) -ENOMEM) {
+		spin_unlock(&pagetable->lock);
+		return -ENOMEM;
+	}
+
+	ret = _insert_gpuaddr(pagetable, addr, size);
+	spin_unlock(&pagetable->lock);
+
+	if (ret == 0) {
+		memdesc->gpuaddr = addr;
+		memdesc->pagetable = pagetable;
+	}
+
+	return ret;
+}
 
 static int kgsl_iommu_get_gpuaddr(struct kgsl_pagetable *pagetable,
 		struct kgsl_memdesc *memdesc)
 {
 	struct kgsl_iommu_pt *pt = pagetable->priv;
 	int ret = 0;
-	uint64_t addr, start, end, size;
-	unsigned int align;
+	u64 start, end, size, align;
 
 	if (WARN_ON(kgsl_memdesc_use_cpu_map(memdesc)))
 		return -EINVAL;
@@ -2229,8 +2252,7 @@ static int kgsl_iommu_get_gpuaddr(struct kgsl_pagetable *pagetable,
 
 	size = kgsl_memdesc_footprint(memdesc);
 
-	align = max_t(uint64_t, 1 << kgsl_memdesc_get_align(memdesc),
-			PAGE_SIZE);
+	align = kgsl_get_align(memdesc);
 
 	if (memdesc->flags & KGSL_MEMFLAGS_FORCE_32BIT) {
 		start = pt->compat_va_start;
@@ -2240,28 +2262,13 @@ static int kgsl_iommu_get_gpuaddr(struct kgsl_pagetable *pagetable,
 		end = pt->va_end;
 	}
 
-	spin_lock(&pagetable->lock);
-
-	addr = _get_unmapped_area(pagetable, start, end, size, align);
-
-	if (addr == (uint64_t) -ENOMEM) {
-		ret = -ENOMEM;
-		goto out;
+	ret = get_gpuaddr(pagetable, memdesc, start, end, size, align);
+	/* if OOM, retry once after flushing mem_workqueue */
+	if (ret == -ENOMEM) {
+		flush_workqueue(kgsl_driver.mem_workqueue);
+		ret = get_gpuaddr(pagetable, memdesc, start, end, size, align);
 	}
 
-	/*
-	 * This path is only called in a non-SVM path with locks so we can be
-	 * sure we aren't racing with anybody so we don't need to worry about
-	 * taking the lock
-	 */
-	ret = _insert_gpuaddr(pagetable, addr, size);
-	if (ret == 0) {
-		memdesc->gpuaddr = addr;
-		memdesc->pagetable = pagetable;
-	}
-
-out:
-	spin_unlock(&pagetable->lock);
 	return ret;
 }
 
@@ -2295,17 +2302,19 @@ static bool kgsl_iommu_addr_in_range(struct kgsl_pagetable *pagetable,
 		uint64_t gpuaddr, uint64_t size)
 {
 	struct kgsl_iommu_pt *pt = pagetable->priv;
+	u64 end = gpuaddr + size;
 
-	if (gpuaddr == 0)
+	/* Make sure we don't wrap around */
+	if (gpuaddr == 0 || end < gpuaddr)
 		return false;
 
-	if (gpuaddr >= pt->va_start && (gpuaddr + size) < pt->va_end)
+	if (gpuaddr >= pt->va_start && end <= pt->va_end)
 		return true;
 
-	if (gpuaddr >= pt->compat_va_start && (gpuaddr + size) < pt->compat_va_end)
+	if (gpuaddr >= pt->compat_va_start && end <= pt->compat_va_end)
 		return true;
 
-	if (gpuaddr >= pt->svm_start && (gpuaddr + size) < pt->svm_end)
+	if (gpuaddr >= pt->svm_start && end <= pt->svm_end)
 		return true;
 
 	return false;
@@ -2372,6 +2381,20 @@ static int iommu_probe_user_context(struct kgsl_device *device,
 		"gfx3d_user");
 	if (ret)
 		return ret;
+
+	/*
+	 * It is problematic if smmu driver does system suspend before consumer
+	 * device (gpu). So smmu driver creates a device_link to act as a
+	 * supplier which in turn will ensure correct order during system
+	 * suspend. In kgsl, since we don't initialize iommu on the gpu device,
+	 * we should create a device_link between kgsl iommu device and gpu
+	 * device to maintain a correct suspend order between smmu device and
+	 * gpu device.
+	 */
+	if (!device_link_add(&device->pdev->dev, &iommu->user_context.pdev->dev,
+			DL_FLAG_AUTOREMOVE_CONSUMER))
+		dev_err(&iommu->user_context.pdev->dev,
+				"Unable to create device link to gpu device\n");
 
 	mmu->defaultpagetable = kgsl_mmu_getpagetable(mmu, KGSL_MMU_GLOBAL_PT);
 

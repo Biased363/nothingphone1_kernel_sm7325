@@ -11,6 +11,7 @@
 #include "adreno_coresight.h"
 #include "adreno_dispatch.h"
 #include "adreno_drawctxt.h"
+#include "adreno_hwsched.h"
 #include "adreno_perfcounter.h"
 #include "adreno_profile.h"
 #include "adreno_ringbuffer.h"
@@ -583,6 +584,8 @@ struct adreno_device {
 	 * controls perfcounter ioctl read
 	 */
 	bool perfcounter;
+	/** @hwsched: Container for the hardware dispatcher */
+	struct adreno_hwsched hwsched;
 };
 
 /**
@@ -779,8 +782,6 @@ struct adreno_gpudev {
 	void (*preemption_schedule)(struct adreno_device *adreno_dev);
 	int (*preemption_context_init)(struct kgsl_context *context);
 	void (*context_detach)(struct adreno_context *drawctxt);
-	void (*clk_set_options)(struct adreno_device *adreno_dev,
-				const char *name, struct clk *clk, bool on);
 	void (*pre_reset)(struct adreno_device *adreno_dev);
 	void (*gpu_keepalive)(struct adreno_device *adreno_dev,
 			bool state);

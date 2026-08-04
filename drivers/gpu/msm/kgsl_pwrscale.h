@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2010-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
  */
 
 #ifndef __KGSL_PWRSCALE_H
@@ -33,7 +33,6 @@ struct kgsl_power_stats {
  * @devfreq_wq - Main devfreq workqueue
  * @devfreq_suspend_ws - Pass device suspension to devfreq
  * @devfreq_resume_ws - Pass device resume to devfreq
- * @devfreq_notify_ws - Notify devfreq to update sampling
  * @next_governor_call - Timestamp after which the governor may be notified of
  * a new sample
  * @cooling_dev - Thermal cooling device handle
@@ -57,7 +56,10 @@ struct kgsl_pwrscale {
 	struct workqueue_struct *devfreq_wq;
 	struct work_struct devfreq_suspend_ws;
 	struct work_struct devfreq_resume_ws;
-	struct work_struct devfreq_notify_ws;
+	/** @devfreq_notify_worker: kthread worker to handle devfreq notify event */
+	struct kthread_worker *devfreq_notify_worker;
+	/** @devfreq_notify_work: work struct to update devfreq as per request */
+	struct kthread_work devfreq_notify_work;
 	ktime_t next_governor_call;
 	struct thermal_cooling_device *cooling_dev;
 	bool ctxt_aware_enable;
@@ -101,4 +103,11 @@ int kgsl_busmon_get_dev_status(struct device *dev,
 			struct devfreq_dev_status *stat);
 int kgsl_busmon_get_cur_freq(struct device *dev, unsigned long *freq);
 
+int msm_adreno_tz_init(void);
+
+void msm_adreno_tz_exit(void);
+
+int devfreq_gpubw_init(void);
+
+void devfreq_gpubw_exit(void);
 #endif

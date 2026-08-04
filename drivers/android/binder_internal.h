@@ -3,7 +3,6 @@
 #ifndef _LINUX_BINDER_INTERNAL_H
 #define _LINUX_BINDER_INTERNAL_H
 
-#include <linux/export.h>
 #include <linux/fs.h>
 #include <linux/list.h>
 #include <linux/miscdevice.h>
@@ -14,6 +13,7 @@
 #include <linux/uidgid.h>
 #include <uapi/linux/android/binderfs.h>
 #include "binder_alloc.h"
+#include "dbitmap.h"
 
 struct binder_context {
 	struct binder_node *binder_context_mgr_node;
@@ -24,8 +24,7 @@ struct binder_context {
 
 /**
  * struct binder_device - information about a binder device node
- * @hlist:          list of binder devices (only used for devices requested via
- *                  CONFIG_ANDROID_BINDER_DEVICES)
+ * @hlist:          list of binder devices
  * @miscdev:        information about a binder character device node
  * @context:        binder context information
  * @binderfs_inode: This is the inode of the root dentry of the super block
@@ -70,7 +69,9 @@ struct binderfs_info {
 	kgid_t root_gid;
 	struct binderfs_mount_opts mount_opts;
 	int device_count;
+#ifdef CONFIG_ANDROID_BINDER_LOGS
 	struct dentry *proc_log_dir;
+#endif
 };
 
 extern const struct file_operations binder_fops;
@@ -111,6 +112,18 @@ static inline int __init init_binderfs(void)
 }
 #endif
 
+enum binder_stat_types {
+	BINDER_STAT_PROC,
+	BINDER_STAT_THREAD,
+	BINDER_STAT_NODE,
+	BINDER_STAT_REF,
+	BINDER_STAT_DEATH,
+	BINDER_STAT_TRANSACTION,
+	BINDER_STAT_TRANSACTION_COMPLETE,
+	BINDER_STAT_COUNT
+};
+
+#ifdef CONFIG_ANDROID_BINDER_LOGS
 int binder_stats_show(struct seq_file *m, void *unused);
 DEFINE_SHOW_ATTRIBUTE(binder_stats);
 
@@ -153,23 +166,13 @@ struct binder_transaction_log {
 	struct binder_transaction_log_entry entry[32];
 };
 
-enum binder_stat_types {
-	BINDER_STAT_PROC,
-	BINDER_STAT_THREAD,
-	BINDER_STAT_NODE,
-	BINDER_STAT_REF,
-	BINDER_STAT_DEATH,
-	BINDER_STAT_TRANSACTION,
-	BINDER_STAT_TRANSACTION_COMPLETE,
-	BINDER_STAT_COUNT
-};
-
 struct binder_stats {
 	atomic_t br[_IOC_NR(BR_ONEWAY_SPAM_SUSPECT) + 1];
 	atomic_t bc[_IOC_NR(BC_REPLY_SG) + 1];
 	atomic_t obj_created[BINDER_STAT_COUNT];
 	atomic_t obj_deleted[BINDER_STAT_COUNT];
 };
+#endif
 
 /**
  * struct binder_work - work enqueued on a worklist
@@ -439,6 +442,8 @@ enum binder_prio_state {
  * @freeze_wait:          waitqueue of processes waiting for all outstanding
  *                        transactions to be processed
  *                        (protected by @inner_lock)
+ * @dmap                  dbitmap to manage available reference descriptors
+ *                        (protected by @outer_lock)
  * @todo:                 list of work for this process
  *                        (protected by @inner_lock)
  * @stats:                per-process binder statistics
@@ -487,11 +492,13 @@ struct binder_proc {
 	bool sync_recv;
 	bool async_recv;
 	wait_queue_head_t freeze_wait;
-
+	struct dbitmap dmap;
 	struct list_head todo;
+#ifdef CONFIG_ANDROID_BINDER_LOGS
 	struct binder_stats stats;
+#endif
 	struct list_head delivered_death;
-	int max_threads;
+	u32 max_threads;
 	int requested_threads;
 	int requested_threads_started;
 	int tmp_ref;
@@ -593,7 +600,9 @@ struct binder_thread {
 	struct binder_error return_error;
 	struct binder_error reply_error;
 	wait_queue_head_t wait;
+#ifdef CONFIG_ANDROID_BINDER_LOGS
 	struct binder_stats stats;
+#endif
 	atomic_t tmp_ref;
 	bool is_dead;
 	struct task_struct *task;
@@ -607,6 +616,7 @@ struct binder_thread {
  * @fixup_entry:          list entry
  * @file:                 struct file to be associated with new fd
  * @offset:               offset in buffer data to this fixup
+ * @target_fd:            fd to use by the target to install @file
  *
  * List element for fd fixups in a transaction. Since file
  * descriptors need to be allocated in the context of the
@@ -617,6 +627,7 @@ struct binder_txn_fd_fixup {
 	struct list_head fixup_entry;
 	struct file *file;
 	size_t offset;
+	int target_fd;
 };
 
 struct binder_transaction {
@@ -670,6 +681,22 @@ struct binder_object {
 	};
 };
 
+/**
+ * Add a binder device to binder_devices
+ * @device: the new binder device to add to the global list
+ *
+ */
+void binder_add_device(struct binder_device *device);
+
+/**
+ * Remove a binder device to binder_devices
+ * @device: the binder device to remove from the global list
+ */
+void binder_remove_device(struct binder_device *device);
+
+#ifdef CONFIG_ANDROID_BINDER_LOGS
 extern struct binder_transaction_log binder_transaction_log;
 extern struct binder_transaction_log binder_transaction_log_failed;
+#endif
+
 #endif /* _LINUX_BINDER_INTERNAL_H */

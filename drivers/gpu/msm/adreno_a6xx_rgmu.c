@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk-provider.h>
@@ -718,9 +718,6 @@ static int a6xx_gpu_boot(struct adreno_device *adreno_dev)
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	int ret;
 
-	/* Clear any GPU faults that might have been left over */
-	adreno_clear_gpu_fault(adreno_dev);
-
 	adreno_set_active_ctxs_null(adreno_dev);
 
 	adreno_ringbuffer_set_global(adreno_dev, 0);
@@ -793,6 +790,9 @@ static int a6xx_rgmu_boot(struct adreno_device *adreno_dev)
 
 	a6xx_rgmu_irq_enable(adreno_dev);
 
+	/* Clear any GPU faults that might have been left over */
+	adreno_clear_gpu_fault(adreno_dev);
+
 	ret = a6xx_rgmu_fw_start(adreno_dev, GMU_COLD_BOOT);
 	if (ret)
 		goto err;
@@ -825,27 +825,33 @@ static void rgmu_idle_check(struct work_struct *work)
 	struct kgsl_device *device = container_of(work,
 					struct kgsl_device, idle_check_ws);
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+	int ret;
 
 	mutex_lock(&device->mutex);
 
 	if (test_bit(GMU_DISABLE_SLUMBER, &device->gmu_core.flags))
 		goto done;
 
-	if (!atomic_read(&device->active_cnt)) {
-		spin_lock(&device->submit_lock);
+	if (atomic_read(&device->active_cnt) || time_is_after_jiffies(device->idle_jiffies)) {
+		kgsl_pwrscale_update(device);
+		kgsl_start_idle_timer(device);
+		goto done;
+	}
 
-		if (device->submit_now) {
-			spin_unlock(&device->submit_lock);
-			kgsl_pwrscale_update(device);
-			kgsl_start_idle_timer(device);
-			goto done;
-		}
+	spin_lock(&device->submit_lock);
 
-		device->slumber = true;
+	if (device->submit_now) {
 		spin_unlock(&device->submit_lock);
+		kgsl_pwrscale_update(device);
+		kgsl_start_idle_timer(device);
+		goto done;
+	}
 
-		a6xx_power_off(adreno_dev);
-	} else {
+	device->slumber = true;
+	spin_unlock(&device->submit_lock);
+
+	ret = a6xx_power_off(adreno_dev);
+	if (ret == -EBUSY) {
 		kgsl_pwrscale_update(device);
 		kgsl_start_idle_timer(device);
 	}
@@ -928,7 +934,6 @@ static void a6xx_rgmu_touch_wakeup(struct adreno_device *adreno_dev)
 	device->pwrctrl.last_stat_updated = ktime_get();
 
 	kgsl_pwrctrl_set_state(device, KGSL_STATE_ACTIVE);
-
 }
 
 static int a6xx_first_boot(struct adreno_device *adreno_dev)
@@ -1032,6 +1037,11 @@ static int a6xx_power_off(struct adreno_device *adreno_dev)
 	if (ret) {
 		a6xx_rgmu_oob_clear(device, oob_gpu);
 		goto no_gx_power;
+	}
+
+	if (adreno_irq_pending(adreno_dev)) {
+		a6xx_gmu_oob_clear(device, oob_gpu);
+		return -EBUSY;
 	}
 
 	kgsl_pwrscale_update_stats(device);

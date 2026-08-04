@@ -93,7 +93,7 @@ static inline void KGSL_STATS_ADD(uint64_t size, atomic_long_t *stat,
 		atomic_long_set(max, ret);
 }
 
-#define KGSL_MAX_NUMIBS 100000
+#define KGSL_MAX_NUMIBS 2000
 #define KGSL_MAX_SYNCPOINTS 32
 
 struct kgsl_device;
@@ -263,7 +263,7 @@ struct kgsl_global_memdesc {
  *  are still references to it.
  * @dev_priv: back pointer to the device file that created this entry.
  * @metadata: String containing user specified metadata for the entry
- * @work: Work struct used to schedule a kgsl_mem_entry_put in atomic contexts
+ * @work: Work struct used to schedule kgsl_mem_entry_destroy()
  */
 struct kgsl_mem_entry {
 	struct kref refcount;
@@ -419,6 +419,7 @@ long kgsl_ioctl_timeline_destroy(struct kgsl_device_private *dev_priv,
 		unsigned int cmd, void *data);
 
 void kgsl_mem_entry_destroy(struct kref *kref);
+void kgsl_mem_entry_destroy_deferred(struct kref *kref);
 
 void kgsl_get_egl_counts(struct kgsl_mem_entry *entry,
 			int *egl_surface_count, int *egl_image_count);
@@ -521,22 +522,23 @@ static inline void kgsl_schedule_work(struct work_struct *work)
 	queue_work(kgsl_driver.workqueue, work);
 }
 
-static inline int
+static inline struct kgsl_mem_entry *
 kgsl_mem_entry_get(struct kgsl_mem_entry *entry)
 {
-	if (entry)
-		return kref_get_unless_zero(&entry->refcount);
-	return 0;
+	if (!IS_ERR_OR_NULL(entry) && kref_get_unless_zero(&entry->refcount))
+		return entry;
+
+	return NULL;
 }
 
 static inline void
 kgsl_mem_entry_put(struct kgsl_mem_entry *entry)
 {
-	if (entry)
+	if (!IS_ERR_OR_NULL(entry))
 		kref_put(&entry->refcount, kgsl_mem_entry_destroy);
 }
 
-/**
+/*
  * kgsl_mem_entry_put_deferred() - Puts refcount and triggers deferred
  * mem_entry destroy when refcount is the last refcount.
  * @entry: memory entry to be put.
@@ -544,7 +546,11 @@ kgsl_mem_entry_put(struct kgsl_mem_entry *entry)
  * Use this to put a memory entry when we don't want to block
  * the caller while destroying memory entry.
  */
-void kgsl_mem_entry_put_deferred(struct kgsl_mem_entry *entry);
+static inline void kgsl_mem_entry_put_deferred(struct kgsl_mem_entry *entry)
+{
+	if (entry)
+		kref_put(&entry->refcount, kgsl_mem_entry_destroy_deferred);
+}
 
 /*
  * kgsl_addr_range_overlap() - Checks if 2 ranges overlap

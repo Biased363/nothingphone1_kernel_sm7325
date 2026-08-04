@@ -73,10 +73,7 @@ modpost_link()
 
 	objects="--whole-archive				\
 		${KBUILD_VMLINUX_OBJS}				\
-		--no-whole-archive				\
-		--start-group					\
-		${KBUILD_VMLINUX_LIBS}				\
-		--end-group"
+		${KBUILD_VMLINUX_LIBS}"
 
 	if [ -n "${CONFIG_LTO_CLANG}" ]; then
 		# This might take a while, so indicate that we're doing
@@ -86,7 +83,7 @@ modpost_link()
 		info LD ${1}
 	fi
 
-	${LD} ${KBUILD_LDFLAGS} -r -o ${1} $(lto_lds) ${objects}
+	${LDFINAL} ${KBUILD_LDFLAGS} -r -o ${1} $(lto_lds) ${objects}
 }
 
 # If CONFIG_LTO_CLANG is selected, we postpone running recordmcount until
@@ -123,7 +120,7 @@ vmlinux_link()
 	fi
 
 	if [ "${SRCARCH}" != "um" ]; then
-		if [ -n "${CONFIG_LTO_CLANG}" ]; then
+		if [ -n "${CONFIG_LTO_CLANG}" ] || [ -n "${CONFIG_LTO_GCC}" ]; then
 			# Use vmlinux.o instead of performing the slow LTO
 			# link again.
 			objects="--whole-archive		\
@@ -145,7 +142,7 @@ vmlinux_link()
 				${@}"
 		fi
 
-		${LD} ${KBUILD_LDFLAGS} ${LDFLAGS_vmlinux}	\
+		${LDFINAL} ${KBUILD_LDFLAGS} ${LDFLAGS_vmlinux}	\
 			${strip_debug#-Wl,}			\
 			-o ${output}				\
 			-T ${lds} ${objects}

@@ -419,6 +419,7 @@ static inline int avc_xperms_audit(struct selinux_state *state,
 				   u8 perm, int result,
 				   struct common_audit_data *ad)
 {
+#ifdef CONFIG_AUDIT
 	u32 audited, denied;
 
 	audited = avc_xperms_audit_required(
@@ -427,6 +428,9 @@ static inline int avc_xperms_audit(struct selinux_state *state,
 		return 0;
 	return slow_avc_audit(state, ssid, tsid, tclass, requested,
 			audited, denied, result, ad);
+#else
+	return 0;
+#endif
 }
 
 static void avc_node_free(struct rcu_head *rhead)
@@ -653,6 +657,7 @@ found:
 	return node;
 }
 
+#ifdef CONFIG_AUDIT
 /**
  * avc_audit_pre_callback - SELinux specific information
  * will be called by generic audit code
@@ -667,7 +672,7 @@ static void avc_audit_pre_callback(struct audit_buffer *ab, void *a)
 	const char **perms;
 	int i, perm;
 
-	audit_log_format(ab, "avc:  %s ", sad->denied ? "denied" : "granted");
+	audit_log_format(ab, "avc:  denied ");
 
 	if (av == 0) {
 		audit_log_format(ab, " null");
@@ -728,8 +733,7 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
 
 	audit_log_format(ab, " tclass=%s", secclass_map[sad->tclass-1].name);
 
-	if (sad->denied)
-		audit_log_format(ab, " permissive=%u", sad->result ? 0 : 1);
+	audit_log_format(ab, " permissive=%u", sad->result ? 0 : 1);
 
 	/* in case of invalid context report also the actual context string */
 	rc = security_sid_to_context_inval(sad->state, sad->ssid, &scontext,
@@ -762,6 +766,9 @@ noinline int slow_avc_audit(struct selinux_state *state,
 	struct common_audit_data stack_data;
 	struct selinux_audit_data sad;
 
+	if (!denied)
+		return 0;
+
 	if (WARN_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map)))
 		return -EINVAL;
 
@@ -775,7 +782,6 @@ noinline int slow_avc_audit(struct selinux_state *state,
 	sad.ssid = ssid;
 	sad.tsid = tsid;
 	sad.audited = audited;
-	sad.denied = denied;
 	sad.result = result;
 	sad.state = state;
 
@@ -784,6 +790,7 @@ noinline int slow_avc_audit(struct selinux_state *state,
 	common_lsm_audit(a, avc_audit_pre_callback, avc_audit_post_callback);
 	return 0;
 }
+#endif
 
 /**
  * avc_add_callback - Register a callback for security events.

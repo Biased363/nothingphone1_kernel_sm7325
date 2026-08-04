@@ -612,11 +612,12 @@ void try_to_unmap_flush_dirty(void)
 		try_to_unmap_flush();
 }
 
-static void set_tlb_ubc_flush_pending(struct mm_struct *mm, bool writable)
+static void set_tlb_ubc_flush_pending(struct mm_struct *mm, bool writable,
+				       unsigned long uaddr)
 {
 	struct tlbflush_unmap_batch *tlb_ubc = &current->tlb_ubc;
 
-	arch_tlbbatch_add_mm(&tlb_ubc->arch, mm);
+	arch_tlbbatch_add_pending(&tlb_ubc->arch, mm, uaddr);
 	tlb_ubc->flush_required = true;
 
 	/*
@@ -641,17 +642,10 @@ static void set_tlb_ubc_flush_pending(struct mm_struct *mm, bool writable)
  */
 static bool should_defer_flush(struct mm_struct *mm, enum ttu_flags flags)
 {
-	bool should_defer = false;
-
 	if (!(flags & TTU_BATCH_FLUSH))
 		return false;
 
-	/* If remote CPUs need to be flushed then defer batch the flush */
-	if (cpumask_any_but(mm_cpumask(mm), get_cpu()) < nr_cpu_ids)
-		should_defer = true;
-	put_cpu();
-
-	return should_defer;
+	return arch_tlbbatch_should_defer(mm);
 }
 
 /*
@@ -672,7 +666,7 @@ static bool should_defer_flush(struct mm_struct *mm, enum ttu_flags flags)
 void flush_tlb_batched_pending(struct mm_struct *mm)
 {
 	if (mm->tlb_flush_batched) {
-		flush_tlb_mm(mm);
+		arch_flush_tlb_batched_pending(mm);
 
 		/*
 		 * Do not allow the compiler to re-order the clearing of
@@ -1532,7 +1526,7 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 			 */
 			pteval = ptep_get_and_clear(mm, address, pvmw.pte);
 
-			set_tlb_ubc_flush_pending(mm, pte_dirty(pteval));
+			set_tlb_ubc_flush_pending(mm, pte_dirty(pteval), address);
 		} else {
 			pteval = ptep_clear_flush(vma, address, pvmw.pte);
 		}
@@ -1744,24 +1738,19 @@ static int page_not_mapped(struct page *page)
  * try_to_unmap - try to remove all page table mappings to a page
  * @page: the page to get unmapped
  * @flags: action and flags
- * @vma : target vma for reclaim
  *
  * Tries to remove all the page table entries which are mapping this
  * page, used in the pageout path.  Caller must hold the page lock.
- * If @vma is not NULL, this function try to remove @page from only @vma
- * without peeking all mapped vma for @page.
  *
  * If unmap is successful, return true. Otherwise, false.
  */
-bool try_to_unmap(struct page *page, enum ttu_flags flags,
-				struct vm_area_struct *vma)
+bool try_to_unmap(struct page *page, enum ttu_flags flags)
 {
 	struct rmap_walk_control rwc = {
 		.rmap_one = try_to_unmap_one,
 		.arg = (void *)flags,
 		.done = page_not_mapped,
 		.anon_lock = page_lock_anon_vma_read,
-		.target_vma = vma,
 	};
 
 	/*
@@ -1806,7 +1795,6 @@ void try_to_munlock(struct page *page)
 		.arg = (void *)TTU_MUNLOCK,
 		.done = page_not_mapped,
 		.anon_lock = page_lock_anon_vma_read,
-		.target_vma = NULL,
 
 	};
 
@@ -1878,13 +1866,6 @@ static void rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc,
 	pgoff_t pgoff_start, pgoff_end;
 	struct anon_vma_chain *avc;
 
-	if (rwc->target_vma) {
-		unsigned long address = vma_address(page, rwc->target_vma);
-
-		rwc->rmap_one(page, rwc->target_vma, address, rwc->arg);
-		return;
-	}
-
 	if (locked) {
 		anon_vma = page_anon_vma(page);
 		/* anon_vma disappear under us? */
@@ -1892,7 +1873,6 @@ static void rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc,
 	} else {
 		anon_vma = rmap_walk_anon_lock(page, rwc);
 	}
-
 	if (!anon_vma)
 		return;
 
@@ -1938,7 +1918,6 @@ static void rmap_walk_file(struct page *page, struct rmap_walk_control *rwc,
 	struct address_space *mapping = page_mapping(page);
 	pgoff_t pgoff_start, pgoff_end;
 	struct vm_area_struct *vma;
-	unsigned long address;
 
 	/*
 	 * The page lock not only makes sure that page->mapping cannot
@@ -1965,13 +1944,6 @@ static void rmap_walk_file(struct page *page, struct rmap_walk_control *rwc,
 		i_mmap_lock_read(mapping);
 	}
 lookup:
-
-	if (rwc->target_vma) {
-		address = vma_address(page, rwc->target_vma);
-		rwc->rmap_one(page, rwc->target_vma, address, rwc->arg);
-		goto done;
-	}
-
 	vma_interval_tree_foreach(vma, &mapping->i_mmap,
 			pgoff_start, pgoff_end) {
 		unsigned long address = vma_address(page, vma);

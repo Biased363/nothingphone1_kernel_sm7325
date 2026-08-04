@@ -44,6 +44,7 @@
 #include <linux/ctype.h>
 #include <linux/mm.h>
 #include <linux/mempolicy.h>
+#include <linux/string_helpers.h>
 
 #include <linux/compat.h>
 #include <linux/syscalls.h>
@@ -1208,6 +1209,24 @@ DECLARE_RWSEM(uts_sem);
 #define override_architecture(name)	0
 #endif
 
+static void override_custom_release(char __user *release, size_t len)
+{
+#ifdef CONFIG_UNAME_OVERRIDE
+	char *buf;
+
+	buf = kstrdup_quotable_cmdline(current, GFP_KERNEL);
+	if (buf == NULL)
+		return;
+
+	if (strstr(buf, CONFIG_UNAME_OVERRIDE_TARGET)) {
+		copy_to_user(release, CONFIG_UNAME_OVERRIDE_STRING,
+			       strlen(CONFIG_UNAME_OVERRIDE_STRING) + 1);
+	}
+
+	kfree(buf);
+#endif
+}
+
 /*
  * Work around broken programs that cannot handle "Linux 3.0".
  * Instead we map 3.x to 2.6.40+x, so e.g. 3.0 would be 2.6.40
@@ -1243,13 +1262,38 @@ static int override_release(char __user *release, size_t len)
 SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 {
 	struct new_utsname tmp;
+	struct task_struct *t;
+	bool is_netmgrd = false;
 
 	down_read(&uts_sem);
 	memcpy(&tmp, utsname(), sizeof(tmp));
+	if (!strncmp(current->comm, "bpfloader", 9) ||
+	    !strncmp(current->comm, "netbpfload", 10) ||
+	    !strncmp(current->comm, "netd", 4)) {
+		strcpy(tmp.release, "5.10.239");
+		pr_debug("fake uname: %s/%d release=%s\n",
+			 current->comm, current->pid, tmp.release);
+	}
 	up_read(&uts_sem);
+
+	rcu_read_lock();
+	for_each_thread(current, t) {
+		if (thread_group_leader(t)) {
+			is_netmgrd = !strcmp(t->comm, "netmgrd");
+			break;
+		}
+	}
+	rcu_read_unlock();
+
+	if (is_netmgrd)
+		snprintf(tmp.release, sizeof(tmp.release), "%u.%u.%u-qgki",
+			 (u8)((LINUX_VERSION_CODE >> 16) & 0xff), (u8)((LINUX_VERSION_CODE >> 8) & 0xff),
+			 (u16)(LINUX_VERSION_CODE & 0xffff));
+
 	if (copy_to_user(name, &tmp, sizeof(tmp)))
 		return -EFAULT;
 
+	override_custom_release(name->release, sizeof(name->release));
 	if (override_release(name->release, sizeof(name->release)))
 		return -EFAULT;
 	if (override_architecture(name))
@@ -1270,10 +1314,33 @@ SYSCALL_DEFINE1(uname, struct old_utsname __user *, name)
 
 	down_read(&uts_sem);
 	memcpy(&tmp, utsname(), sizeof(tmp));
+#ifndef CONFIG_FAKE_UNAME_NONE
+	if (!strncmp(current->comm, "bpfloader", 9) ||
+	    !strncmp(current->comm, "netbpfload", 10) ||
+	    !strncmp(current->comm, "netd", 4) ||
+	    !strncmp(current->comm, "uprobestats", 11)) {
+#if defined(CONFIG_FAKE_UNAME_5_4)
+		strcpy(tmp.release, "5.4.200");
+#elif defined(CONFIG_FAKE_UNAME_5_10)
+		strcpy(tmp.release, "5.10.200");
+#elif defined(CONFIG_FAKE_UNAME_5_15)
+		strcpy(tmp.release, "5.15.200");
+#elif defined(CONFIG_FAKE_UNAME_6_1)
+		strcpy(tmp.release, "6.1.200");
+#elif defined(CONFIG_FAKE_UNAME_6_6)
+		strcpy(tmp.release, "6.6.200");
+#elif defined(CONFIG_FAKE_UNAME_6_12)
+		strcpy(tmp.release, "6.12.200");
+#endif
+		pr_debug("fake uname: %s/%d release=%s\n",
+			 current->comm, current->pid, tmp.release);
+	}
+#endif
 	up_read(&uts_sem);
 	if (copy_to_user(name, &tmp, sizeof(tmp)))
 		return -EFAULT;
 
+	override_custom_release(name->release, sizeof(name->release));
 	if (override_release(name->release, sizeof(name->release)))
 		return -EFAULT;
 	if (override_architecture(name))

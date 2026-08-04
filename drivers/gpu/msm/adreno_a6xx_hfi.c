@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/delay.h>
@@ -81,7 +82,7 @@ int a6xx_hfi_queue_read(struct a6xx_gmu_device *gmu, uint32_t queue_idx,
 	if (GMU_VER_MAJOR(gmu->ver.hfi) >= 2)
 		read = ALIGN(read, SZ_4) % hdr->queue_size;
 
-	hdr->read_index = read;
+	hfi_update_read_idx(hdr, read);
 
 done:
 	return result;
@@ -128,7 +129,7 @@ int a6xx_hfi_queue_write(struct adreno_device *adreno_dev, uint32_t queue_idx,
 		}
 	}
 
-	hdr->write_index = write;
+	hfi_update_write_idx(hdr, write);
 
 	return 0;
 }
@@ -336,8 +337,6 @@ static int a6xx_hfi_send_cmd_wait_inline(struct adreno_device *adreno_dev,
 	return rc;
 }
 
-#define HFI_ACK_ERROR 0xffffffff
-
 int a6xx_hfi_send_generic_req(struct adreno_device *adreno_dev, void *cmd)
 {
 	struct pending_cmd ret_cmd;
@@ -346,18 +345,22 @@ int a6xx_hfi_send_generic_req(struct adreno_device *adreno_dev, void *cmd)
 	memset(&ret_cmd, 0, sizeof(ret_cmd));
 
 	rc = a6xx_hfi_send_cmd_wait_inline(adreno_dev, cmd, &ret_cmd);
+	if (rc)
+		return rc;
 
-	if (!rc && ret_cmd.results[2] == HFI_ACK_ERROR) {
+	if (ret_cmd.results[2]) {
 		struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);
 		struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 
 		gmu_fault_snapshot(device);
-		dev_err(&gmu->pdev->dev, "HFI ACK failure: Req 0x%8.8X\n",
-						ret_cmd.results[1]);
+		dev_err(&gmu->pdev->dev,
+				"HFI ACK failure: Req=0x%8.8X, Result=0x%8.8X\n",
+				ret_cmd.results[1],
+				ret_cmd.results[2]);
 		return -EINVAL;
 	}
 
-	return rc;
+	return 0;
 }
 
 static int a6xx_hfi_send_gmu_init(struct adreno_device *adreno_dev)
@@ -686,28 +689,32 @@ int a6xx_hfi_send_acd_feature_ctrl(struct adreno_device *adreno_dev)
 	return ret;
 }
 
+static void reset_hfi_queues(struct adreno_device *adreno_dev)
+{
+	struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);
+	struct gmu_memdesc *mem_addr = gmu->hfi.hfi_mem;
+	struct hfi_queue_table *tbl = mem_addr->hostptr;
+	struct hfi_queue_header *hdr;
+	unsigned int i;
+
+	/* Flush HFI queues */
+	for (i = 0; i < HFI_QUEUE_MAX; i++) {
+		hdr = &tbl->qhdr[i];
+
+		if (hdr->status == HFI_QUEUE_STATUS_DISABLED)
+			continue;
+
+		hdr->read_index = hdr->write_index;
+	}
+}
+
 int a6xx_hfi_start(struct adreno_device *adreno_dev)
 {
 	struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
-	struct gmu_memdesc *mem_addr = gmu->hfi.hfi_mem;
-	struct hfi_queue_table *tbl = mem_addr->hostptr;
-	struct hfi_queue_header *hdr;
-	int result, i;
+	int result;
 
-	/* Force read_index to the write_index no matter what */
-	for (i = 0; i < HFI_QUEUE_MAX; i++) {
-		hdr = &tbl->qhdr[i];
-		if (hdr->status == HFI_QUEUE_STATUS_DISABLED)
-			continue;
-
-		if (hdr->read_index != hdr->write_index) {
-			dev_err(&gmu->pdev->dev,
-				"HFI Q[%d] Index Error: read:0x%X write:0x%X\n",
-				i, hdr->read_index, hdr->write_index);
-			hdr->read_index = hdr->write_index;
-		}
-	}
+	reset_hfi_queues(adreno_dev);
 
 	/* This is legacy HFI message for A630 and A615 family firmware */
 	if (adreno_is_a630(adreno_dev) || adreno_is_a615_family(adreno_dev)) {
@@ -782,28 +789,11 @@ err:
 void a6xx_hfi_stop(struct adreno_device *adreno_dev)
 {
 	struct a6xx_gmu_device *gmu = to_a6xx_gmu(adreno_dev);
-	struct gmu_memdesc *mem_addr = gmu->hfi.hfi_mem;
-	struct hfi_queue_table *tbl = mem_addr->hostptr;
-	struct hfi_queue_header *hdr;
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
-	unsigned int i;
-
-	/* Flush HFI queues */
-	for (i = 0; i < HFI_QUEUE_MAX; i++) {
-		hdr = &tbl->qhdr[i];
-		if (hdr->status == HFI_QUEUE_STATUS_DISABLED)
-			continue;
-
-		if (hdr->read_index != hdr->write_index)
-			dev_err(&gmu->pdev->dev,
-			"HFI queue[%d] is not empty before close: rd=%d,wt=%d\n",
-				i, hdr->read_index, hdr->write_index);
-	}
 
 	kgsl_pwrctrl_axi(device, KGSL_PWRFLAGS_OFF);
 
 	clear_bit(GMU_PRIV_HFI_STARTED, &gmu->flags);
-
 }
 
 /* HFI interrupt handler */

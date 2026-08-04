@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022,2025 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <soc/qcom/msm_performance.h>
+#include <uapi/linux/sched/types.h>
 #include "adreno.h"
 #include "adreno_sysfs.h"
 #include "adreno_trace.h"
@@ -548,6 +549,12 @@ static int dispatcher_queue_context(struct adreno_device *adreno_dev,
 static int sendcmd(struct adreno_device *adreno_dev,
 	struct kgsl_drawobj_cmd *cmdobj)
 {
+	struct sched_param sched_param = { .sched_priority = MAX_RT_PRIO / 2 };
+	int nice = task_nice(current);
+	struct sched_attr attr = {
+		.sched_policy = SCHED_NORMAL,
+		.sched_nice   = nice,
+	};
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	struct kgsl_drawobj *drawobj = DRAWOBJ(cmdobj);
 	const struct adreno_gpudev *gpudev = ADRENO_GPU_DEVICE(adreno_dev);
@@ -556,11 +563,17 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	struct adreno_dispatcher_drawqueue *dispatch_q =
 				ADRENO_DRAWOBJ_DISPATCH_DRAWQUEUE(drawobj);
 	int ret;
+	int is_current_rt = rt_task(current);
 
 	mutex_lock(&device->mutex);
+
+	/* Elevating thread’s priority to avoid context switch with holding device mutex */
+	if (!is_current_rt)
+		sched_setscheduler_nocheck(current, SCHED_FIFO, &sched_param);
+
 	if (adreno_gpu_halt(adreno_dev) != 0) {
-		mutex_unlock(&device->mutex);
-		return -EBUSY;
+		ret = -EBUSY;
+		goto err;
 	}
 
 	dispatcher->inflight++;
@@ -573,8 +586,7 @@ static int sendcmd(struct adreno_device *adreno_dev,
 		if (ret) {
 			dispatcher->inflight--;
 			dispatch_q->inflight--;
-			mutex_unlock(&device->mutex);
-			return ret;
+			goto err;
 		}
 
 		set_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv);
@@ -630,8 +642,6 @@ static int sendcmd(struct adreno_device *adreno_dev,
 		dispatcher->inflight--;
 		dispatch_q->inflight--;
 
-		mutex_unlock(&device->mutex);
-
 		/*
 		 * Don't log a message in case of:
 		 * -ENOENT means that the context was detached before the
@@ -645,7 +655,7 @@ static int sendcmd(struct adreno_device *adreno_dev,
 			dev_err(device->dev,
 				     "Unable to submit command to the ringbuffer %d\n",
 				     ret);
-		return ret;
+		goto err;
 	}
 
 	/*
@@ -663,6 +673,9 @@ static int sendcmd(struct adreno_device *adreno_dev,
 			       pid_nr(context->proc_priv->pid),
 			       context->id, drawobj->timestamp,
 			       !!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
+
+	if (!is_current_rt)
+		sched_setattr_nocheck(current, &attr);
 
 	mutex_unlock(&device->mutex);
 
@@ -688,6 +701,11 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	if (gpudev->preemption_schedule)
 		gpudev->preemption_schedule(adreno_dev);
 	return 0;
+err:
+	if (!is_current_rt)
+		sched_setattr_nocheck(current, &attr);
+	mutex_unlock(&device->mutex);
+	return ret;
 }
 
 /**
@@ -1117,7 +1135,7 @@ static inline int _verify_cmdobj(struct kgsl_device_private *dev_priv,
 		struct kgsl_context *context, struct kgsl_drawobj *drawobj[],
 		uint32_t count)
 {
-	struct kgsl_device *device = dev_priv->device;
+	struct kgsl_device *device __maybe_unused = dev_priv->device;
 	struct kgsl_memobj_node *ib;
 	unsigned int i;
 
@@ -1667,7 +1685,7 @@ static void adreno_fault_header(struct kgsl_device *device,
 	if (!gx_on) {
 		if (drawobj != NULL)
 			pr_fault(device, drawobj,
-				"%s fault ctx %d ctx_type %s ts %d and GX is OFF\n",
+				"%s fault ctx %u ctx_type %s ts %u and GX is OFF\n",
 				type, drawobj->context->id,
 				kgsl_context_type(drawctxt->type),
 				drawobj->timestamp);
@@ -1698,7 +1716,7 @@ static void adreno_fault_header(struct kgsl_device *device,
 			ib2base, ib2sz, drawctxt->rb->id);
 
 		pr_fault(device, drawobj,
-			"%s fault ctx %d ctx_type %s ts %d status %8.8X rb %4.4x/%4.4x ib1 %16.16llX/%4.4x ib2 %16.16llX/%4.4x\n",
+			"%s fault ctx %u ctx_type %s ts %u status %8.8X rb %4.4x/%4.4x ib1 %16.16llX/%4.4x ib2 %16.16llX/%4.4x\n",
 			type, drawobj->context->id,
 			kgsl_context_type(drawctxt->type),
 			drawobj->timestamp, status,
@@ -1900,7 +1918,7 @@ static void process_cmdobj_fault(struct kgsl_device *device,
 
 	/* If we get here then all the policies failed */
 
-	pr_context(device, drawobj->context, "gpu %s ctx %d ts %d\n",
+	pr_context(device, drawobj->context, "gpu %s ctx %d ts %u\n",
 		state, drawobj->context->id, drawobj->timestamp);
 
 	/* Mark the context as failed */
@@ -2011,7 +2029,7 @@ replay:
 
 		if (ret) {
 			pr_context(device, replay[i]->base.context,
-				"gpu reset failed ctx %d ts %d\n",
+				"gpu reset failed ctx %u ts %u\n",
 				replay[i]->base.context->id,
 				replay[i]->base.timestamp);
 
@@ -2271,7 +2289,7 @@ static void _print_recovery(struct kgsl_device *device,
 	struct kgsl_drawobj *drawobj = DRAWOBJ(cmdobj);
 
 	pr_context(device, drawobj->context,
-		"gpu %s ctx %d ts %d policy %lX\n",
+		"gpu %s ctx %u ts %u policy %lX\n",
 		_ft_type(nr), drawobj->context->id, drawobj->timestamp,
 		cmdobj->fault_recovery);
 }
@@ -2368,7 +2386,7 @@ static void _adreno_dispatch_check_timeout(struct adreno_device *adreno_dev,
 	if (drawobj->context->flags & KGSL_CONTEXT_NO_FAULT_TOLERANCE)
 		return;
 
-	pr_context(device, drawobj->context, "gpu timeout ctx %d ts %d\n",
+	pr_context(device, drawobj->context, "gpu timeout ctx %u ts %u\n",
 		drawobj->context->id, drawobj->timestamp);
 
 	adreno_set_gpu_fault(adreno_dev, ADRENO_TIMEOUT_FAULT);

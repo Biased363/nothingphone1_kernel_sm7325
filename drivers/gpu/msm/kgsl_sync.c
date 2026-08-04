@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2012-2019, 2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/file.h>
@@ -324,7 +325,7 @@ int kgsl_sync_timeline_create(struct kgsl_context *context)
 
 	kref_init(&ktimeline->kref);
 	snprintf(ktimeline->name, sizeof(ktimeline->name),
-		"%s_%d-%.15s(%d)-%.15s(%d)",
+		"%s_%u-%.15s(%d)-%.15s(%d)",
 		context->device->name, context->id,
 		current->group_leader->comm, current->group_leader->pid,
 		current->comm, current->pid);
@@ -424,54 +425,8 @@ static void kgsl_sync_fence_callback(struct dma_fence *fence,
 	}
 }
 
-static void kgsl_get_fence_names(struct dma_fence *fence,
-	struct event_fence_info *info_ptr)
-{
-	unsigned int num_fences;
-	struct dma_fence **fences;
-	struct dma_fence_array *array;
-	int i;
-
-	if (!info_ptr)
-		return;
-
-	array = to_dma_fence_array(fence);
-
-	if (array != NULL) {
-		num_fences = array->num_fences;
-		fences = array->fences;
-	} else {
-		num_fences = 1;
-		fences = &fence;
-	}
-
-	info_ptr->fences = kcalloc(num_fences, sizeof(struct fence_info),
-			GFP_KERNEL);
-	if (info_ptr->fences == NULL)
-		return;
-
-	info_ptr->num_fences = num_fences;
-
-	for (i = 0; i < num_fences; i++) {
-		struct dma_fence *f = fences[i];
-		struct fence_info *fi = &info_ptr->fences[i];
-		int len;
-
-		len =  scnprintf(fi->name, sizeof(fi->name), "%s %s",
-			f->ops->get_driver_name(f),
-			f->ops->get_timeline_name(f));
-
-		if (f->ops->fence_value_str) {
-			len += scnprintf(fi->name + len, sizeof(fi->name) - len,
-				": ");
-			f->ops->fence_value_str(f, fi->name + len,
-				sizeof(fi->name) - len);
-		}
-	}
-}
-
 struct kgsl_sync_fence_cb *kgsl_sync_fence_async_wait(int fd,
-	bool (*func)(void *priv), void *priv, struct event_fence_info *info_ptr)
+	bool (*func)(void *priv), void *priv)
 {
 	struct kgsl_sync_fence_cb *kcb;
 	struct dma_fence *fence;
@@ -496,8 +451,6 @@ struct kgsl_sync_fence_cb *kgsl_sync_fence_async_wait(int fd,
 	kcb->fence = fence;
 	kcb->priv = priv;
 	kcb->func = func;
-
-	kgsl_get_fence_names(fence, info_ptr);
 
 	/* if status then error or signaled */
 	status = dma_fence_add_callback(fence, &kcb->fence_cb,

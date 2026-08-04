@@ -27,12 +27,14 @@
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/android_vendor.h>
+#include <linux/thread_info.h>
 
 #include <vdso/processor.h>
 
 #include <asm/alternative.h>
 #include <asm/cpufeature.h>
 #include <asm/hw_breakpoint.h>
+#include <asm/kasan.h>
 #include <asm/lse.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/pointer_auth.h>
@@ -220,6 +222,18 @@ static inline void start_thread(struct pt_regs *regs, unsigned long pc,
 	regs->sp = sp;
 }
 
+static inline bool is_ttbr0_addr(unsigned long addr)
+{
+	/* entry assembly clears tags for TTBR0 addrs */
+	return addr < TASK_SIZE;
+}
+
+static inline bool is_ttbr1_addr(unsigned long addr)
+{
+	/* TTBR1 addresses may have a tag if KASAN_SW_TAGS is in use */
+	return arch_kasan_reset_tag(addr) >= PAGE_OFFSET;
+}
+
 #ifdef CONFIG_COMPAT
 static inline void compat_start_thread(struct pt_regs *regs, unsigned long pc,
 				       unsigned long sp)
@@ -271,14 +285,6 @@ static inline void prefetch(const void *ptr)
 static inline void prefetchw(const void *ptr)
 {
 	asm volatile("prfm pstl1keep, %a0\n" : : "p" (ptr));
-}
-
-#define ARCH_HAS_SPINLOCK_PREFETCH
-static inline void spin_lock_prefetch(const void *ptr)
-{
-	asm volatile(ARM64_LSE_ATOMIC_INSN(
-		     "prfm pstl1strm, %a0",
-		     "nop") : : "p" (ptr));
 }
 
 extern unsigned long __ro_after_init signal_minsigstksz; /* sigframe size */

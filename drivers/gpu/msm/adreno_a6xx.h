@@ -288,7 +288,7 @@ void a6xx_cx_regulator_disable_wait(struct regulator *reg,
 				struct kgsl_device *device, u32 timeout);
 
 /* Preemption functions */
-void a6xx_preemption_trigger(struct adreno_device *adreno_dev);
+void a6xx_preemption_trigger(struct adreno_device *adreno_dev, bool atomic);
 void a6xx_preemption_schedule(struct adreno_device *adreno_dev);
 void a6xx_preemption_start(struct adreno_device *adreno_dev);
 int a6xx_preemption_init(struct adreno_device *adreno_dev);
@@ -336,15 +336,6 @@ u64 a6xx_read_alwayson(struct adreno_device *adreno_dev);
  * time we boot the gpu
  */
 void a6xx_start(struct adreno_device *adreno_dev);
-
-/**
- * a6xx_sqe_unhalt - Unhalt the SQE engine
- * @adreno_dev: An Adreno GPU handle
- *
- * Points the hardware to the microcode location in memory and then
- * unhalts the SQE so that it can fetch instructions from DDR
- */
-void a6xx_unhalt_sqe(struct adreno_device *adreno_dev);
 
 /**
  * a6xx_init - Initialize a6xx resources
@@ -443,4 +434,7 @@ void a6xx_rdpm_mx_freq_update(struct a6xx_gmu_device *gmu, u32 freq);
  * This function communicates GPU cx frequency(in Mhz) changes to rdpm.
  */
 void a6xx_rdpm_cx_freq_update(struct a6xx_gmu_device *gmu, u32 freq);
+
+void a6xx_cp_init_cmds(struct adreno_device *adreno_dev, u32 *cmds);
+
 #endif

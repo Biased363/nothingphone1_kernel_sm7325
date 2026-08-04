@@ -177,6 +177,22 @@ config LOCALVERSION_AUTO
 
 	  which is done within the script "scripts/setlocalversion".)
 
+menuconfig UNAME_OVERRIDE
+	bool "Override uname output for specific processes"
+	help
+	  This will modify struct new_utsname->release string's return value
+	  to another string on a specified process.
+
+if UNAME_OVERRIDE
+
+config UNAME_OVERRIDE_TARGET
+	string "Target process' cmdline for uname override"
+
+config UNAME_OVERRIDE_STRING
+	string "New uname's release string for uname override"
+
+endif
+
 config BUILD_SALT
        string "Build ID Salt"
        default ""
@@ -186,6 +202,20 @@ config BUILD_SALT
           This is mostly useful for distributions which want to ensure the
           build is unique between builds. It's safe to leave the default.
 
+config POLLY_CLANG
+	bool "Use Clang's Polly optimizations"
+	depends on CC_IS_CLANG && $(cc-option, -mllvm -polly)
+	depends on !COMPILE_TEST
+	default y
+	help
+	  This option enables Clang's polyhedral loop optimizer known as
+	  Polly. Polly is able to optimize various loops throughout the
+	  kernel for cache locality. This requires a Clang toolchain
+	  compiled with support for Polly. More information can be found
+	  from Polly's website:
+
+	  https://polly.llvm.org
+	    
 config HAVE_KERNEL_GZIP
 	bool
 
@@ -1353,6 +1383,10 @@ config CC_OPTIMIZE_FOR_SIZE
 
 endchoice
 
+config LTO_GCC
+	bool "Enable Link Time Optimization for GCC"
+	depends on CC_IS_GCC
+
 config HAVE_LD_DEAD_CODE_DATA_ELIMINATION
 	bool
 	help
@@ -1912,18 +1946,6 @@ config VM_EVENT_COUNTERS
 	  on EXPERT systems.  /proc/vmstat will only show page counts
 	  if VM event counters are disabled.
 
-config VM_EVENT_COUNT_CLEAN_PAGE_RECLAIM
-	bool "Track the number of clean pages reclaimed from the page cache"
-	depends on VM_EVENT_COUNTERS
-	help
-	  VM event counters currently maintain a count of the pages that
-	  get dropped from the page cache as a part of memory reclaim.
-	  However, this count only tracks the number of dirty pages that
-	  get dropped, and does not account for the clean pages that get
-	  dropped as well. Enable this to also account for the clean pages
-	  that get dropped as part of memory reclaim to get a more holistic
-	  view of what is happening during memory reclaim.
-
 config SLUB_DEBUG
 	default y
 	bool "Enable SLUB debugging support" if EXPERT
@@ -2432,6 +2454,37 @@ config ASN1
 	  that can be interpreted by the ASN.1 stream decoder and used to
 	  inform it as to what tags are to be expected in a stream and what
 	  functions to call on what tags.
+
+choice
+    prompt "Fake uname kernel version"
+    default FAKE_UNAME_NONE
+    help
+      Kernel side spoof for BPF.
+
+config FAKE_UNAME_NONE
+    bool "None"
+    help
+      Don't spoof uname version.
+
+config FAKE_UNAME_5_4
+    bool "5.4"
+
+config FAKE_UNAME_5_10
+    bool "5.10"
+
+config FAKE_UNAME_5_15
+    bool "5.15"
+
+config FAKE_UNAME_6_1
+	bool "6.1"
+
+config FAKE_UNAME_6_6
+	bool "6.6"
+
+config FAKE_UNAME_6_12
+	bool "6.12"
+
+endchoice
 
 source "kernel/Kconfig.locks"
 

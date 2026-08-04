@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2002,2008-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2002,2008-2021, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/debugfs.h>
@@ -137,21 +137,12 @@ static void sync_event_print(struct seq_file *s,
 				sync_event->context->id, sync_event->timestamp);
 		break;
 	}
-	case KGSL_CMD_SYNCPOINT_TYPE_FENCE: {
-		int i;
-		struct event_fence_info *info = sync_event->priv;
-
-		for (i = 0; info && i < info->num_fences; i++)
-			seq_printf(s, "sync: %s",
-				info->fences[i].name);
-		break;
-	}
 	case KGSL_CMD_SYNCPOINT_TYPE_TIMELINE: {
 		int j;
 		struct event_timeline_info *info = sync_event->priv;
 
 		for (j = 0; info && info[j].timeline; j++)
-			seq_printf(s, "timeline: %d seqno: %d",
+			seq_printf(s, "timeline: %d seqno: %lld",
 				info[j].timeline, info[j].seqno);
 		break;
 	}

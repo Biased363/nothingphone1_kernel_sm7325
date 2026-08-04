@@ -40,12 +40,6 @@
 	msr	daif, \flags
 	.endm
 
-	/* Only on aarch64 pstate, PSR_D_BIT is different for aarch32 */
-	.macro	inherit_daif, pstate:req, tmp:req
-	and	\tmp, \pstate, #(PSR_D_BIT | PSR_A_BIT | PSR_I_BIT | PSR_F_BIT)
-	msr	daif, \tmp
-	.endm
-
 	/* IRQ is the lowest priority flag, unconditionally unmask the rest. */
 	.macro enable_da_f
 	msr	daifclr, #(8 | 4 | 1)
@@ -103,13 +97,6 @@
 	orr	\tmp, \tmp, #DBG_MDSCR_SS
 	msr	mdscr_el1, \tmp
 9990:
-	.endm
-
-/*
- * SMP data memory barrier
- */
-	.macro	smp_dmb, opt
-	dmb	\opt
 	.endm
 
 /*
@@ -296,12 +283,6 @@ alternative_endif
 	ldr	\rd, [\rn, #VMA_VM_MM]
 	.endm
 
-/*
- * mmid - get context id from mm pointer (mm->context.id)
- */
-	.macro	mmid, rd, rn
-	ldr	\rd, [\rn, #MM_CONTEXT_ID]
-	.endm
 /*
  * read_ctr - read CTR_EL0. If the system has mismatched register fields,
  * provide the system wide safe value from arm64_ftr_reg_ctrel0.sys_val

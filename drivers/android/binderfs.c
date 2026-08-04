@@ -30,7 +30,6 @@
 #include <linux/uaccess.h>
 #include <linux/user_namespace.h>
 #include <linux/xarray.h>
-#include <uapi/asm-generic/errno-base.h>
 #include <uapi/linux/android/binder.h>
 #include <uapi/linux/android/binderfs.h>
 
@@ -204,6 +203,8 @@ static int binderfs_binder_device_create(struct inode *ref_inode,
 	fsnotify_create(root->d_inode, dentry);
 	inode_unlock(d_inode(root));
 
+	binder_add_device(device);
+
 	return 0;
 
 err:
@@ -269,6 +270,7 @@ static void binderfs_evict_inode(struct inode *inode)
 	mutex_unlock(&binderfs_minors_mutex);
 
 	if (refcount_dec_and_test(&device->ref)) {
+		binder_remove_device(device);
 		kfree(device->context.name);
 		kfree(device);
 	}
@@ -632,6 +634,7 @@ static int init_binder_features(struct super_block *sb)
 	return 0;
 }
 
+#ifdef CONFIG_ANDROID_BINDER_LOGS
 static int init_binder_logs(struct super_block *sb)
 {
 	struct dentry *binder_logs_root_dir, *dentry, *proc_log_dir;
@@ -709,6 +712,12 @@ static int init_binder_logs(struct super_block *sb)
 out:
 	return ret;
 }
+#else
+static inline int init_binder_logs(struct super_block *sb)
+{
+	return 0;
+}
+#endif
 
 static int binderfs_fill_super(struct super_block *sb, void *data, int silent)
 {
