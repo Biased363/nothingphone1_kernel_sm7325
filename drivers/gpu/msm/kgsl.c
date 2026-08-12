@@ -282,6 +282,7 @@ static void add_dmabuf_list(struct kgsl_dma_buf_meta *meta)
 {
 	struct dmabuf_list_entry *dle;
 	struct page *page;
+	struct kgsl_device *device = dev_get_drvdata(meta->attach->dev);
 
 	/*
 	 * Get the first page. We will use it to identify the imported
@@ -311,6 +312,8 @@ static void add_dmabuf_list(struct kgsl_dma_buf_meta *meta)
 		list_add(&dle->node, &kgsl_dmabuf_list);
 		meta->dle = dle;
 		list_add(&meta->node, &dle->dmabuf_list);
+		kgsl_trace_gpu_mem_total(device,
+				 meta->entry->memdesc.size);
 	}
 	spin_unlock(&kgsl_dmabuf_lock);
 }
@@ -318,6 +321,7 @@ static void add_dmabuf_list(struct kgsl_dma_buf_meta *meta)
 static void remove_dmabuf_list(struct kgsl_dma_buf_meta *meta)
 {
 	struct dmabuf_list_entry *dle = meta->dle;
+	struct kgsl_device *device = dev_get_drvdata(meta->attach->dev);
 
 	if (!dle)
 		return;
@@ -327,6 +331,8 @@ static void remove_dmabuf_list(struct kgsl_dma_buf_meta *meta)
 	if (list_empty(&dle->dmabuf_list)) {
 		list_del(&dle->node);
 		kfree(dle);
+		kgsl_trace_gpu_mem_total(device,
+				-(meta->entry->memdesc.size));
 	}
 	spin_unlock(&kgsl_dmabuf_lock);
 }
@@ -955,7 +961,7 @@ static struct kgsl_process_private *kgsl_process_private_new(
 	/* Search in the process list */
 	list_for_each_entry(private, &kgsl_driver.process_list, list) {
 		if (private->pid == cur_pid) {
-			if (!kgsl_process_private_get(private)) {
+			if (!kgsl_process_private_get(private))
 				/*
 				 * This will happen only if refcount is zero
 				 * i.e. destroy is triggered but didn't complete
@@ -964,12 +970,6 @@ static struct kgsl_process_private *kgsl_process_private_new(
 				 * appropriate action.
 				 */
 				private = ERR_PTR(-EEXIST);
-			} else {
-				mutex_lock(&private->private_mutex);
-				private->fd_count++;
-				mutex_unlock(&private->private_mutex);
-			}
-
 			/*
 			 * We need to hold only one reference to the PID for
 			 * each process struct to avoid overflowing the
@@ -989,14 +989,12 @@ static struct kgsl_process_private *kgsl_process_private_new(
 
 	kref_init(&private->refcount);
 
-	private->fd_count = 1;
 	private->pid = cur_pid;
 	get_task_comm(private->comm, current->group_leader);
 
 	spin_lock_init(&private->mem_lock);
 	spin_lock_init(&private->syncsource_lock);
 	spin_lock_init(&private->ctxt_count_lock);
-	mutex_init(&private->private_mutex);
 
 	idr_init(&private->mem_idr);
 	idr_init(&private->syncsource_idr);
@@ -1056,10 +1054,10 @@ static void process_release_memory(struct kgsl_process_private *private)
 static void kgsl_process_private_close(struct kgsl_device_private *dev_priv,
 		struct kgsl_process_private *private)
 {
-	mutex_lock(&private->private_mutex);
+	mutex_lock(&kgsl_driver.process_mutex);
 
 	if (--private->fd_count > 0) {
-		mutex_unlock(&private->private_mutex);
+		mutex_unlock(&kgsl_driver.process_mutex);
 		kgsl_process_private_put(private);
 		return;
 	}
@@ -1074,7 +1072,7 @@ static void kgsl_process_private_close(struct kgsl_device_private *dev_priv,
 	/* Release all syncsource objects from process private */
 	kgsl_syncsource_process_release_syncsources(private);
 
-	mutex_unlock(&private->private_mutex);
+	mutex_unlock(&kgsl_driver.process_mutex);
 
 	kgsl_process_private_put(private);
 }
@@ -1086,8 +1084,14 @@ static struct kgsl_process_private *_process_private_open(
 
 	mutex_lock(&kgsl_driver.process_mutex);
 	private = kgsl_process_private_new(device);
-	mutex_unlock(&kgsl_driver.process_mutex);
 
+	if (IS_ERR(private))
+		goto done;
+
+	private->fd_count++;
+
+done:
+	mutex_unlock(&kgsl_driver.process_mutex);
 	return private;
 }
 
@@ -2264,7 +2268,7 @@ static long gpumem_free_entry_on_timestamp(struct kgsl_device *device,
 	kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_RETIRED, &temp);
 	trace_kgsl_mem_timestamp_queue(device, entry, context->id, temp,
 		timestamp);
-	ret = kgsl_add_low_prio_event(device, &context->events,
+	ret = kgsl_add_event(device, &context->events,
 		timestamp, gpumem_free_func, entry);
 
 	if (ret)
@@ -4208,7 +4212,6 @@ static int kgsl_mmap(struct file *file, struct vm_area_struct *vma)
 	struct kgsl_process_private *private = dev_priv->process_priv;
 	struct kgsl_mem_entry *entry = NULL;
 	struct kgsl_device *device = dev_priv->device;
-	uint64_t flags;
 	int ret;
 
 	/* Handle leagacy behavior for memstore */
@@ -4252,11 +4255,8 @@ static int kgsl_mmap(struct file *file, struct vm_area_struct *vma)
 
 	vma->vm_ops = &kgsl_gpumem_vm_ops;
 
-	flags = entry->memdesc.flags;
-
-	if (!(flags & KGSL_MEMFLAGS_IOCOHERENT) &&
-	    (cache == KGSL_CACHEMODE_WRITEBACK ||
-	     cache == KGSL_CACHEMODE_WRITETHROUGH)) {
+	if (cache == KGSL_CACHEMODE_WRITEBACK
+		|| cache == KGSL_CACHEMODE_WRITETHROUGH) {
 		int i;
 		unsigned long addr = vma->vm_start;
 		struct kgsl_memdesc *m = &entry->memdesc;
@@ -4274,15 +4274,6 @@ static int kgsl_mmap(struct file *file, struct vm_area_struct *vma)
 	atomic64_add(entry->memdesc.size, &entry->priv->gpumem_mapped);
 
 	atomic_inc(&entry->map_count);
-
-	/*
-	 * kgsl gets the entry id or the gpu address through vm_pgoff.
-	 * It is used during mmap and never needed again. But this vm_pgoff
-	 * has different meaning at other parts of kernel. Not setting to
-	 * zero will let way for wrong assumption when tried to unmap a page
-	 * from this vma.
-	 */
-	vma->vm_pgoff = 0;
 
 	trace_kgsl_mem_mmap(entry, vma->vm_start);
 	return 0;
@@ -4647,22 +4638,10 @@ void kgsl_core_exit(void)
 		ARRAY_SIZE(kgsl_driver.devp));
 }
 
-static long kgsl_run_one_worker(struct kthread_worker *worker,
-		struct task_struct **thread, const char *name)
-{
-	kthread_init_worker(worker);
-	*thread = kthread_run(kthread_worker_fn, worker, name);
-	if (IS_ERR(*thread)) {
-		pr_err("unable to start %s\n", name);
-		return PTR_ERR(thread);
-	}
-	return 0;
-}
-
 int __init kgsl_core_init(void)
 {
 	int result = 0;
-	struct sched_param param = { .sched_priority = 16 };
+	struct sched_param param = { .sched_priority = 2 };
 
 	place_marker("M - DRIVER KGSL Init");
 
@@ -4747,16 +4726,17 @@ int __init kgsl_core_init(void)
 		goto err;
 	}
 
-	if (IS_ERR_VALUE(kgsl_run_one_worker(&kgsl_driver.worker,
-			&kgsl_driver.worker_thread,
-			"kgsl_worker_thread")) ||
-		IS_ERR_VALUE(kgsl_run_one_worker(&kgsl_driver.low_prio_worker,
-			&kgsl_driver.low_prio_worker_thread,
-			"kgsl_low_prio_worker_thread")))
+	kthread_init_worker(&kgsl_driver.worker);
+
+	kgsl_driver.worker_thread = kthread_run(kthread_worker_fn,
+		&kgsl_driver.worker, "kgsl_worker_thread");
+
+	if (IS_ERR(kgsl_driver.worker_thread)) {
+		pr_err("kgsl: unable to start kgsl thread\n");
 		goto err;
+	}
 
 	sched_setscheduler(kgsl_driver.worker_thread, SCHED_FIFO, &param);
-	/* kgsl_driver.low_prio_worker_thread should not be SCHED_FIFO */
 
 	kgsl_events_init();
 
